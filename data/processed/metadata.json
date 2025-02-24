@@ -1,0 +1,37 @@
+{
+    "GIDS": {
+        "train_size": 14051,
+        "val_size": 1864,
+        "test_size": 5653,
+        "no_relation_label": "NA",
+        "id_to_label": {
+            "0": "NA",
+            "1": "/people/deceased_person/place_of_death",
+            "2": "/people/person/place_of_birth",
+            "3": "/people/person/education./education/education/institution",
+            "4": "/people/person/education./education/education/degree"
+        },
+        "label_to_id": {
+            "NA": 0,
+            "/people/deceased_person/place_of_death": 1,
+            "/people/person/place_of_birth": 2,
+            "/people/person/education./education/education/institution": 3,
+            "/people/person/education./education/education/degree": 4
+        },
+        "id_to_label_related_only": {
+            "0": "/people/deceased_person/place_of_death",
+            "1": "/people/person/place_of_birth",
+            "2": "/people/person/education./education/education/institution",
+            "3": "/people/person/education./education/education/degree"
+        },
+        "label_to_id_related_only": {
+            "/people/deceased_person/place_of_death": 0,
+            "/people/person/place_of_birth": 1,
+            "/people/person/education./education/education/institution": 2,
+            "/people/person/education./education/education/degree": 3
+        },
+        "train_related_only_size": 8513,
+        "test_related_only_size": 4304,
+        "val_related_only_size": 1417
+    }
+}
