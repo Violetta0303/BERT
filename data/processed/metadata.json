@@ -87,7 +87,7 @@
             "Entity-Destination(e2,e1)": 17
         },
         "train_related_only_size": 4946,
-        "test_related_only_size": 2263,
-        "val_related_only_size": 1644
+        "val_related_only_size": 1644,
+        "test_related_only_size": 2263
     }
 }
