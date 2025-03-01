@@ -3,12 +3,12 @@ import os
 
 import numpy as np
 import torch
-from matplotlib import pyplot as plt
+from sklearn.model_selection import KFold
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tqdm import tqdm, trange
 from transformers import AdamW, BertConfig, get_linear_schedule_with_warmup
 
-from model import BERT
+from model import RBERT
 from utils import compute_metrics, get_label, write_prediction
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ class Trainer(object):
             id2label={str(i): label for i, label in enumerate(self.label_lst)},
             label2id={label: i for i, label in enumerate(self.label_lst)},
         )
-        self.model = BERT.from_pretrained(args.model_name_or_path, config=self.config, args=args)
+        self.model = RBERT.from_pretrained(args.model_name_or_path, config=self.config, args=args)
 
         # GPU or CPU
         self.device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
@@ -39,128 +39,140 @@ class Trainer(object):
         print(self.device)
 
     def train(self):
-        train_sampler = RandomSampler(self.train_dataset)
-        train_dataloader = DataLoader(
-            self.train_dataset,
-            sampler=train_sampler,
-            batch_size=self.args.train_batch_size,
-        )
+        """Trains the model using either standard training or K-Fold cross-validation."""
 
-        if self.args.max_steps > 0:
-            t_total = self.args.max_steps
-            self.args.num_train_epochs = (
-                    self.args.max_steps // (len(train_dataloader) // self.args.gradient_accumulation_steps) + 1
-            )
+        if self.args.k_folds > 1:
+            logger.info(f"Starting {self.args.k_folds}-Fold Cross-Validation")
+            # Ensure the original dataset is split into K folds
+            kfold_splits = self.split_kfold(self.args.k_folds)
         else:
-            t_total = len(train_dataloader) // self.args.gradient_accumulation_steps * self.args.num_train_epochs
+            kfold_splits = [(self.train_dataset, None)]  # No k-fold, use entire dataset
 
-        # Prepare optimizer and schedule (linear warmup and decay)
-        no_decay = ["bias", "LayerNorm.weight"]
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
-                "weight_decay": self.args.weight_decay,
-            },
-            {
-                "params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
-        ]
-        optimizer = AdamW(
-            optimizer_grouped_parameters,
-            lr=self.args.learning_rate,
-            eps=self.args.adam_epsilon,
-        )
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=self.args.warmup_steps,
-            num_training_steps=t_total,
-        )
+        for fold, (train_dataset, dev_dataset) in enumerate(kfold_splits):
+            logger.info(f"Training on Fold {fold + 1}/{self.args.k_folds}")
 
-        # Tracking metrics and loss
-        self.train_losses = []
-        self.eval_losses = []
-        self.metrics_history = []
+            train_sampler = RandomSampler(train_dataset)
+            train_dataloader = DataLoader(
+                train_dataset,
+                sampler=train_sampler,
+                batch_size=self.args.train_batch_size,
+            )
 
-        # Train!
-        logger.info("***** Running training *****")
-        logger.info("  Num examples = %d", len(self.train_dataset))
-        logger.info("  Num Epochs = %d", self.args.num_train_epochs)
-        logger.info("  Total train batch size = %d", self.args.train_batch_size)
-        logger.info("  Gradient Accumulation steps = %d", self.args.gradient_accumulation_steps)
-        logger.info("  Total optimization steps = %d", t_total)
-        logger.info("  Logging steps = %d", self.args.logging_steps)
-        logger.info("  Save steps = %d", self.args.save_steps)
+            if self.args.max_steps > 0:
+                t_total = self.args.max_steps
+                self.args.num_train_epochs = (
+                        self.args.max_steps // (len(train_dataloader) // self.args.gradient_accumulation_steps) + 1
+                )
+            else:
+                t_total = len(train_dataloader) // self.args.gradient_accumulation_steps * self.args.num_train_epochs
 
-        global_step = 0
-        tr_loss = 0.0
-        self.model.zero_grad()
+            # Configure optimiser and scheduler
+            no_decay = ["bias", "LayerNorm.weight"]
+            optimizer_grouped_parameters = [
+                {
+                    "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
+                    "weight_decay": self.args.weight_decay,
+                },
+                {
+                    "params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+                    "weight_decay": 0.0,
+                },
+            ]
+            optimizer = AdamW(
+                optimizer_grouped_parameters,
+                lr=self.args.learning_rate,
+                eps=self.args.adam_epsilon,
+            )
+            scheduler = get_linear_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=self.args.warmup_steps,
+                num_training_steps=t_total,
+            )
 
-        train_iterator = trange(int(self.args.num_train_epochs), desc="Epoch")
+            # Training loop
+            logger.info("***** Running training *****")
+            logger.info("  Number of examples = %d", len(train_dataset))
+            logger.info("  Number of Epochs = %d", self.args.num_train_epochs)
+            logger.info("  Total train batch size = %d", self.args.train_batch_size)
+            logger.info("  Gradient Accumulation steps = %d", self.args.gradient_accumulation_steps)
+            logger.info("  Total optimisation steps = %d", t_total)
+            logger.info("  Logging steps = %d", self.args.logging_steps)
+            logger.info("  Save steps = %d", self.args.save_steps)
 
-        for epoch in train_iterator:
-            epoch_iterator = tqdm(train_dataloader, desc="Iteration")
-            for step, batch in enumerate(epoch_iterator):
-                self.model.train()
-                batch = tuple(t.to(self.device) for t in batch)  # Move batch to GPU or CPU
-                inputs = {
-                    "input_ids": batch[0],
-                    "attention_mask": batch[1],
-                    "token_type_ids": batch[2],
-                    "labels": batch[3],
-                    "e1_mask": batch[4],
-                    "e2_mask": batch[5],
-                }
-                outputs = self.model(**inputs)
-                loss = outputs[0]
+            global_step = 0
+            tr_loss = 0.0
+            self.model.zero_grad()
 
-                if self.args.gradient_accumulation_steps > 1:
-                    loss = loss / self.args.gradient_accumulation_steps
+            train_iterator = trange(int(self.args.num_train_epochs), desc="Epoch")
 
-                loss.backward()
+            for epoch in train_iterator:
+                epoch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}")
+                for step, batch in enumerate(epoch_iterator):
+                    self.model.train()
+                    batch = tuple(t.to(self.device) for t in batch)  # Move batch to GPU or CPU
+                    inputs = {
+                        "input_ids": batch[0],
+                        "attention_mask": batch[1],
+                        "token_type_ids": batch[2],
+                        "labels": batch[3],
+                        "e1_mask": batch[4],
+                        "e2_mask": batch[5],
+                    }
+                    outputs = self.model(**inputs)
+                    loss = outputs[0]
 
-                tr_loss += loss.item()
-                if (step + 1) % self.args.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+                    if self.args.gradient_accumulation_steps > 1:
+                        loss = loss / self.args.gradient_accumulation_steps
 
-                    optimizer.step()
-                    scheduler.step()  # Update learning rate schedule
-                    self.model.zero_grad()
-                    global_step += 1
+                    loss.backward()
 
-                    if self.args.logging_steps > 0 and global_step % self.args.logging_steps == 0:
-                        eval_results = self.evaluate("test")  # Run evaluation on test set
-                        self.eval_losses.append(eval_results["loss"])  # Store validation loss
-                        self.train_losses.append(tr_loss / global_step)  # Store training loss
+                    tr_loss += loss.item()
+                    if (step + 1) % self.args.gradient_accumulation_steps == 0:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
 
-                        # Store validation metrics (accuracy, precision, recall, f1)
-                        self.metrics_history.append({
-                            "epoch": epoch + 1,
-                            "accuracy": eval_results["accuracy"],
-                            "precision": eval_results["precision"],
-                            "recall": eval_results["recall"],
-                            "f1": eval_results["f1"],
-                        })
+                        optimizer.step()
+                        scheduler.step()  # Update learning rate schedule
+                        self.model.zero_grad()
+                        global_step += 1
 
-                    if self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
-                        self.save_model()
+                        if self.args.logging_steps > 0 and global_step % self.args.logging_steps == 0:
+                            if dev_dataset:
+                                self.evaluate("dev")  # Validate on dev set for cross-validation
+                            else:
+                                self.evaluate("test")  # Direct evaluation on the test set if no dev set exists
+
+                        if self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
+                            self.save_model()
+
+                    if 0 < self.args.max_steps < global_step:
+                        epoch_iterator.close()
+                        break
 
                 if 0 < self.args.max_steps < global_step:
-                    epoch_iterator.close()
+                    train_iterator.close()
                     break
-
-            if 0 < self.args.max_steps < global_step:
-                train_iterator.close()
-                break
-
-        # After training, plot the loss curve and metrics curve
-        self.plot_loss_curve()
-        self.plot_metrics_curve()
 
         return global_step, tr_loss / global_step
 
+    def split_kfold(self, k=5):
+        """Splits the dataset into K folds for cross-validation"""
+        all_data = list(self.train_dataset)  # Convert dataset to list for indexing
+        kf = KFold(n_splits=k, shuffle=True, random_state=42)
+
+        split_data = []
+        for train_idx, dev_idx in kf.split(all_data):
+            train_subset = torch.utils.data.Subset(self.train_dataset, train_idx)
+            dev_subset = torch.utils.data.Subset(self.train_dataset, dev_idx)
+            split_data.append((train_subset, dev_subset))
+
+        return split_data
+
     def evaluate(self, mode):
-        # We use test dataset because semeval doesn't have dev dataset
+        """
+        Evaluates the model on dev or test set.
+
+        :param mode: "dev" or "test"
+        """
         if mode == "test":
             dataset = self.test_dataset
         elif mode == "dev":
@@ -171,10 +183,10 @@ class Trainer(object):
         eval_sampler = SequentialSampler(dataset)
         eval_dataloader = DataLoader(dataset, sampler=eval_sampler, batch_size=self.args.eval_batch_size)
 
-        # Eval!
         logger.info("***** Running evaluation on %s dataset *****", mode)
         logger.info("  Num examples = %d", len(dataset))
         logger.info("  Batch size = %d", self.args.eval_batch_size)
+
         eval_loss = 0.0
         nb_eval_steps = 0
         preds = None
@@ -208,9 +220,14 @@ class Trainer(object):
 
         eval_loss = eval_loss / nb_eval_steps
         results = {"loss": eval_loss}
-        preds = np.argmax(preds, axis=1)
-        write_prediction(self.args, os.path.join(self.args.eval_dir, "proposed_answers.txt"), preds)
 
+        preds = np.argmax(preds, axis=1)
+
+        # **重新生成 answer_keys.txt**
+        write_prediction(self.args, os.path.join(self.args.eval_dir, "proposed_answers.txt"), preds)
+        write_prediction(self.args, os.path.join(self.args.eval_dir, "answer_keys.txt"), out_label_ids)  # ✅ 新增
+
+        # **计算评估结果**
         result = compute_metrics(preds, out_label_ids)
         results.update(result)
 
@@ -219,44 +236,6 @@ class Trainer(object):
             logger.info("  {} = {:.4f}".format(key, results[key]))
 
         return results
-
-    def plot_loss_curve(self):
-        """Plots training loss and validation loss"""
-        output_dir = os.path.join(self.args.output_dir, "figure")
-        os.makedirs(output_dir, exist_ok=True)
-
-        plt.figure(figsize=(10, 5))
-        plt.plot(range(len(self.train_losses)), self.train_losses, label="Train Loss", color="blue")
-        plt.plot(range(len(self.eval_losses)), self.eval_losses, label="Validation Loss", color="red")
-        plt.xlabel("Epochs")
-        plt.ylabel("Loss")
-        plt.title("Training & Validation Loss")
-        plt.legend()
-        plt.savefig(os.path.join(output_dir, "loss_curve.png"))
-        plt.show()
-
-    def plot_metrics_curve(self):
-        """Plots Accuracy, Precision, Recall, and F1-score curves"""
-        output_dir = os.path.join(self.args.output_dir, "figure")
-        os.makedirs(output_dir, exist_ok=True)  # 确保 figure 文件夹存在
-
-        epochs = [entry["epoch"] for entry in self.metrics_history]
-        accuracy = [entry["accuracy"] for entry in self.metrics_history]
-        precision = [entry["precision"] for entry in self.metrics_history]
-        recall = [entry["recall"] for entry in self.metrics_history]
-        f1 = [entry["f1"] for entry in self.metrics_history]
-
-        plt.figure(figsize=(10, 5))
-        plt.plot(epochs, accuracy, label="Accuracy", color="blue")
-        plt.plot(epochs, precision, label="Precision", color="green")
-        plt.plot(epochs, recall, label="Recall", color="orange")
-        plt.plot(epochs, f1, label="F1 Score", color="red")
-        plt.xlabel("Epochs")
-        plt.ylabel("Score")
-        plt.title("Validation Metrics Over Time")
-        plt.legend()
-        plt.savefig(os.path.join(output_dir, "metrics_curve.png"))
-        plt.show()
 
     def save_model(self):
         # Save model checkpoint (Overwrite)
@@ -275,6 +254,6 @@ class Trainer(object):
             raise Exception("Model doesn't exists! Train first!")
 
         self.args = torch.load(os.path.join(self.args.model_dir, "training_args.bin"))
-        self.model = BERT.from_pretrained(self.args.model_dir, args=self.args)
+        self.model = RBERT.from_pretrained(self.args.model_dir, args=self.args)
         self.model.to(self.device)
         logger.info("***** Model Loaded *****")
