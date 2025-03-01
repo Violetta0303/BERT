@@ -1,29 +1,13 @@
 import os
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
+
+EVAL_DIR = "eval"
 
 EVAL_DIR = "eval"
 
 
-# def official_f1():
-#     # Run the perl script
-#     try:
-#         cmd = "perl {0}/semeval2010_task8_scorer-v1.2.pl {0}/proposed_answers.txt {0}/answer_keys.txt > {0}/result.txt".format(
-#             EVAL_DIR
-#         )
-#         os.system(cmd)
-#     except:
-#         raise Exception("perl is not installed or proposed_answers.txt is missing")
-#
-#     with open(os.path.join(EVAL_DIR, "result.txt"), "r", encoding="utf-8") as f:
-#         macro_result = list(f)[-1]
-#         macro_result = macro_result.split(":")[1].replace(">>>", "").strip()
-#         macro_result = macro_result.split("=")[1].strip().replace("%", "")
-#         macro_result = float(macro_result) / 100
-#
-#     return macro_result
-
-def compute_f1_from_files():
-    """Reads the answer files and computes F1-score manually"""
+def compute_metrics_from_files():
+    """Reads the answer files and computes Accuracy, Precision, Recall, and F1-score"""
     proposed_answers_path = os.path.join(EVAL_DIR, "proposed_answers.txt")
     answer_keys_path = os.path.join(EVAL_DIR, "answer_keys.txt")
 
@@ -39,19 +23,31 @@ def compute_f1_from_files():
     if len(proposed_answers) != len(answer_keys):
         raise ValueError("Mismatch: Number of proposed answers and answer keys are not the same.")
 
-    # Convert string labels to integers (if necessary)
+    # Convert string labels to numerical values
     unique_labels = list(set(answer_keys + proposed_answers))
     label_map = {label: idx for idx, label in enumerate(unique_labels)}
 
     y_true = [label_map[label] for label in answer_keys]
     y_pred = [label_map[label] for label in proposed_answers]
 
-    return f1_score(y_true, y_pred, average="macro")  # Compute macro-averaged F1-score
+    metrics = {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, average="macro"),
+        # "recall": recall_score(y_true, y_pred, average="macro"),
+        "f1": f1_score(y_true, y_pred, average="macro"),
+    }
 
-def official_f1():
-    """Replaces the original Perl script with a Python implementation"""
-    macro_result = compute_f1_from_files()
-    return macro_result
+    return metrics
+
+
+def official_metrics():
+    """Returns all computed metrics instead of just F1"""
+    return compute_metrics_from_files()
+
 
 if __name__ == "__main__":
-    print("macro-averaged F1 = {}%".format(official_f1() * 100))
+    metrics = official_metrics()
+    print(f"Accuracy: {metrics['accuracy']:.4f}")
+    print(f"Precision: {metrics['precision']:.4f}")
+    # print(f"Recall: {metrics['recall']:.4f}")
+    print(f"F1 Score: {metrics['f1']:.4f}")

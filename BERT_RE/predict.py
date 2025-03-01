@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from tqdm import tqdm
 
-from model import RBERT
+from model import BERT
 from utils import get_label, init_logger, load_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ def load_model(pred_config, args, device):
         raise Exception("Model doesn't exists! Train first!")
 
     try:
-        model = RBERT.from_pretrained(pred_config.model_dir, args=args)
+        model = BERT.from_pretrained(pred_config.model_dir, args=args)
         model.to(device)
         model.eval()
         logger.info("***** Model Loaded *****")

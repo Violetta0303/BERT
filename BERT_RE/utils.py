@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from transformers import BertTokenizer
 
-from official_eval import official_f1
+from official_eval import official_metrics
 
 ADDITIONAL_SPECIAL_TOKENS = ["<e1>", "</e1>", "<e2>", "</e2>"]
 
@@ -60,7 +60,11 @@ def simple_accuracy(preds, labels):
 
 def acc_and_f1(preds, labels, average="macro"):
     acc = simple_accuracy(preds, labels)
+    metrics = official_metrics()
+
     return {
-        "acc": acc,
-        "f1": official_f1(),
+        "accuracy": acc,
+        "precision": metrics["precision"],
+        # "recall": metrics["recall"],
+        "f1": metrics["f1"],
     }

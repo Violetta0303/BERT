@@ -3,11 +3,12 @@ import os
 
 import numpy as np
 import torch
+from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tqdm import tqdm, trange
 from transformers import AdamW, BertConfig, get_linear_schedule_with_warmup
 
-from model import RBERT
+from model import BERT
 from utils import compute_metrics, get_label, write_prediction
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ class Trainer(object):
             id2label={str(i): label for i, label in enumerate(self.label_lst)},
             label2id={label: i for i, label in enumerate(self.label_lst)},
         )
-        self.model = RBERT.from_pretrained(args.model_name_or_path, config=self.config, args=args)
+        self.model = BERT.from_pretrained(args.model_name_or_path, config=self.config, args=args)
 
         # GPU or CPU
         self.device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
@@ -48,7 +49,7 @@ class Trainer(object):
         if self.args.max_steps > 0:
             t_total = self.args.max_steps
             self.args.num_train_epochs = (
-                self.args.max_steps // (len(train_dataloader) // self.args.gradient_accumulation_steps) + 1
+                    self.args.max_steps // (len(train_dataloader) // self.args.gradient_accumulation_steps) + 1
             )
         else:
             t_total = len(train_dataloader) // self.args.gradient_accumulation_steps * self.args.num_train_epochs
@@ -76,6 +77,11 @@ class Trainer(object):
             num_training_steps=t_total,
         )
 
+        # Tracking metrics and loss
+        self.train_losses = []
+        self.eval_losses = []
+        self.metrics_history = []
+
         # Train!
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(self.train_dataset))
@@ -92,11 +98,11 @@ class Trainer(object):
 
         train_iterator = trange(int(self.args.num_train_epochs), desc="Epoch")
 
-        for _ in train_iterator:
+        for epoch in train_iterator:
             epoch_iterator = tqdm(train_dataloader, desc="Iteration")
             for step, batch in enumerate(epoch_iterator):
                 self.model.train()
-                batch = tuple(t.to(self.device) for t in batch)  # GPU or CPU
+                batch = tuple(t.to(self.device) for t in batch)  # Move batch to GPU or CPU
                 inputs = {
                     "input_ids": batch[0],
                     "attention_mask": batch[1],
@@ -123,7 +129,18 @@ class Trainer(object):
                     global_step += 1
 
                     if self.args.logging_steps > 0 and global_step % self.args.logging_steps == 0:
-                        self.evaluate("test")  # There is no dev set for semeval task
+                        eval_results = self.evaluate("test")  # Run evaluation on test set
+                        self.eval_losses.append(eval_results["loss"])  # Store validation loss
+                        self.train_losses.append(tr_loss / global_step)  # Store training loss
+
+                        # Store validation metrics (accuracy, precision, recall, f1)
+                        self.metrics_history.append({
+                            "epoch": epoch + 1,
+                            "accuracy": eval_results["accuracy"],
+                            "precision": eval_results["precision"],
+                            "recall": eval_results["recall"],
+                            "f1": eval_results["f1"],
+                        })
 
                     if self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
                         self.save_model()
@@ -135,6 +152,10 @@ class Trainer(object):
             if 0 < self.args.max_steps < global_step:
                 train_iterator.close()
                 break
+
+        # After training, plot the loss curve and metrics curve
+        self.plot_loss_curve()
+        self.plot_metrics_curve()
 
         return global_step, tr_loss / global_step
 
@@ -199,6 +220,44 @@ class Trainer(object):
 
         return results
 
+    def plot_loss_curve(self):
+        """Plots training loss and validation loss"""
+        output_dir = os.path.join(self.args.output_dir, "figure")
+        os.makedirs(output_dir, exist_ok=True)
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(range(len(self.train_losses)), self.train_losses, label="Train Loss", color="blue")
+        plt.plot(range(len(self.eval_losses)), self.eval_losses, label="Validation Loss", color="red")
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.title("Training & Validation Loss")
+        plt.legend()
+        plt.savefig(os.path.join(output_dir, "loss_curve.png"))
+        plt.show()
+
+    def plot_metrics_curve(self):
+        """Plots Accuracy, Precision, Recall, and F1-score curves"""
+        output_dir = os.path.join(self.args.output_dir, "figure")
+        os.makedirs(output_dir, exist_ok=True)  # 确保 figure 文件夹存在
+
+        epochs = [entry["epoch"] for entry in self.metrics_history]
+        accuracy = [entry["accuracy"] for entry in self.metrics_history]
+        precision = [entry["precision"] for entry in self.metrics_history]
+        recall = [entry["recall"] for entry in self.metrics_history]
+        f1 = [entry["f1"] for entry in self.metrics_history]
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(epochs, accuracy, label="Accuracy", color="blue")
+        plt.plot(epochs, precision, label="Precision", color="green")
+        plt.plot(epochs, recall, label="Recall", color="orange")
+        plt.plot(epochs, f1, label="F1 Score", color="red")
+        plt.xlabel("Epochs")
+        plt.ylabel("Score")
+        plt.title("Validation Metrics Over Time")
+        plt.legend()
+        plt.savefig(os.path.join(output_dir, "metrics_curve.png"))
+        plt.show()
+
     def save_model(self):
         # Save model checkpoint (Overwrite)
         if not os.path.exists(self.args.model_dir):
@@ -216,6 +275,6 @@ class Trainer(object):
             raise Exception("Model doesn't exists! Train first!")
 
         self.args = torch.load(os.path.join(self.args.model_dir, "training_args.bin"))
-        self.model = RBERT.from_pretrained(self.args.model_dir, args=self.args)
+        self.model = BERT.from_pretrained(self.args.model_dir, args=self.args)
         self.model.to(self.device)
         logger.info("***** Model Loaded *****")

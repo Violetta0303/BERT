@@ -62,13 +62,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--learning_rate",
-        default=2e-05,
+        default=2e-5,
         type=float,
         help="The initial learning rate for Adam.",
     )
     parser.add_argument(
         "--num_train_epochs",
-        default=10.0,
+        default=5.0,
         type=float,
         help="Total number of training epochs to perform.",
     )
