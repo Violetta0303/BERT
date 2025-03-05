@@ -116,10 +116,24 @@ class SemEvalProcessor:
         }
 
         file_to_read = file_override if file_override else file_map.get(mode)
+
+        # If no file is specified for mode, especially for dev mode
+        if not file_to_read and mode == "dev":
+            # Try to find a cross-validation dev file
+            for i in range(5):  # Try up to 5 CV files
+                test_file = f"dev_k_{i}.tsv"
+                if os.path.exists(os.path.join(self.args.data_dir, test_file)):
+                    file_to_read = test_file
+                    break
+
         if not file_to_read:
-            raise ValueError(f"No file specified for mode: {mode}")
+            raise FileNotFoundError(f"No file specified for mode: {mode}")
 
         file_path = os.path.join(self.args.data_dir, file_to_read).replace("\\", "/")
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
         logger.info(f"Loading {mode} dataset from {file_path}")
 
         return self._create_examples(self._read_tsv(file_path), mode)
@@ -312,40 +326,49 @@ def load_and_cache_examples(args, tokenizer, mode, file_override=None):
     """
     processor = processors[args.task](args)
 
-    # Get examples from the dataset
-    examples = processor.get_examples(mode, file_override)
+    try:
+        # Get examples from the dataset
+        examples = processor.get_examples(mode, file_override)
 
-    # Convert examples into model-ready features
-    features = convert_examples_to_features(
-        examples,
-        args.max_seq_len,
-        tokenizer,
-        add_sep_token=args.add_sep_token
-    )
+        # Convert examples into model-ready features
+        features = convert_examples_to_features(
+            examples,
+            args.max_seq_len,
+            tokenizer,
+            add_sep_token=args.add_sep_token
+        )
 
-    logger.info(f"Processed {len(features)} examples for {mode}")
+        logger.info(f"Processed {len(features)} examples for {mode}")
 
-    # Convert features to PyTorch tensors
-    all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
-    all_attention_mask = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
-    all_token_type_ids = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
-    all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.long)
-    all_e1_mask = torch.tensor([f.e1_mask for f in features], dtype=torch.long)  # Ensure entity 1 mask is included
-    all_e2_mask = torch.tensor([f.e2_mask for f in features], dtype=torch.long)  # Ensure entity 2 mask is included
+        # Convert features to PyTorch tensors
+        all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+        all_attention_mask = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
+        all_token_type_ids = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
+        all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.long)
+        all_e1_mask = torch.tensor([f.e1_mask for f in features], dtype=torch.long)
+        all_e2_mask = torch.tensor([f.e2_mask for f in features], dtype=torch.long)
 
-    logger.info(f"Feature shapes: input_ids={all_input_ids.shape}, "
-                f"attention_mask={all_attention_mask.shape}, "
-                f"token_type_ids={all_token_type_ids.shape}, "
-                f"label_ids={all_label_ids.shape}, "
-                f"e1_mask={all_e1_mask.shape}, "
-                f"e2_mask={all_e2_mask.shape}")
+        logger.info(f"Feature shapes: input_ids={all_input_ids.shape}, "
+                    f"attention_mask={all_attention_mask.shape}, "
+                    f"token_type_ids={all_token_type_ids.shape}, "
+                    f"label_ids={all_label_ids.shape}, "
+                    f"e1_mask={all_e1_mask.shape}, "
+                    f"e2_mask={all_e2_mask.shape}")
 
-    return TensorDataset(
-        all_input_ids,
-        all_attention_mask,
-        all_token_type_ids,
-        all_label_ids,
-        all_e1_mask,  # Entity 1 mask
-        all_e2_mask   # Entity 2 mask
-    )
+        return TensorDataset(
+            all_input_ids,
+            all_attention_mask,
+            all_token_type_ids,
+            all_label_ids,
+            all_e1_mask,
+            all_e2_mask
+        )
+    except FileNotFoundError as e:
+        logger.warning(f"File not found for {mode} mode: {e}")
+        if mode == "dev":
+            logger.info("Dev file not found. Returning None for dev dataset.")
+            return None
+        else:
+            # Re-raise for train and test modes
+            raise
 
