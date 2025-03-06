@@ -1,6 +1,0 @@
-Cross-Validation Summary
-==============================
-Accuracy: 0.9980 ¡À 0.0013
-Precision: 0.9920 ¡À 0.0110
-Recall: 0.9634 ¡À 0.0149
-F1_score: 0.9899 ¡À 0.0150
