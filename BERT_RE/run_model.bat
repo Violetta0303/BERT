@@ -58,6 +58,8 @@ if "%1"=="cv" (
     call :evaluate_duo
 ) else if "%1"=="duo-cv-eval" (
     call :evaluate_duo_cv
+) else if "%1"=="cleanup" (
+    call :cleanup_models
 ) else (
     call :train_standard
 )
@@ -84,7 +86,8 @@ python main.py ^
     --learning_rate 2e-5 ^
     --save_epochs 1 ^
     --do_train ^
-    --do_eval
+    --do_eval ^
+    --cleanup_models
 exit /b 0
 
 :train_cv
@@ -104,7 +107,8 @@ python main.py ^
     --save_epochs 1 ^
     --k_folds 5 ^
     --do_train ^
-    --do_eval
+    --do_eval ^
+    --cleanup_models
 exit /b 0
 
 :train_duo
@@ -125,7 +129,8 @@ python main.py ^
     --duo_classifier ^
     --binary_threshold 0.5 ^
     --do_train ^
-    --do_eval
+    --do_eval ^
+    --cleanup_models
 exit /b 0
 
 :train_duo_cv
@@ -147,7 +152,8 @@ python main.py ^
     --binary_threshold 0.5 ^
     --k_folds 5 ^
     --do_train ^
-    --do_eval
+    --do_eval ^
+    --cleanup_models
 exit /b 0
 
 :evaluate_model
@@ -212,4 +218,34 @@ python main.py ^
     --k_folds 5 ^
     --do_eval ^
     --do_dev_eval
+exit /b 0
+
+:cleanup_models
+echo Cleaning up model files to save disk space...
+python main.py ^
+    --model_name_or_path bert-base-uncased ^
+    --task semeval ^
+    --model_dir ./model ^
+    --cleanup_models ^
+    --duo_classifier ^
+    --binary_model_dir ./model/duo/binary
+
+echo Also cleaning cross-validation models...
+python main.py ^
+    --model_name_or_path bert-base-uncased ^
+    --task semeval ^
+    --model_dir ./model/cv ^
+    --cleanup_models ^
+    --k_folds 5
+
+echo Also cleaning duo cross-validation models...
+python main.py ^
+    --model_name_or_path bert-base-uncased ^
+    --task semeval ^
+    --model_dir ./model/duo_cv ^
+    --cleanup_models ^
+    --duo_classifier ^
+    --binary_model_dir ./model/duo_cv/binary ^
+    --k_folds 5
+
 exit /b 0
