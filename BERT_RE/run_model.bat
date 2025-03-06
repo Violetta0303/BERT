@@ -41,10 +41,23 @@ python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
 python -c "import transformers; print(f'Transformers version: {transformers.__version__}')"
 python -c "import numpy; import pandas; import sklearn; import matplotlib; print('All required packages installed')"
 
+REM Optional check for openpyxl
+python -c "try: import openpyxl; print('openpyxl is installed - Excel export available'); except ImportError: print('openpyxl not installed - Excel export will fall back to CSV')" 2>nul
+
 if "%1"=="cv" (
     call :train_cv
 ) else if "%1"=="eval" (
     call :evaluate_model
+) else if "%1"=="cv-eval" (
+    call :evaluate_cv_model
+) else if "%1"=="duo" (
+    call :train_duo
+) else if "%1"=="duo-cv" (
+    call :train_duo_cv
+) else if "%1"=="duo-eval" (
+    call :evaluate_duo
+) else if "%1"=="duo-cv-eval" (
+    call :evaluate_duo_cv
 ) else (
     call :train_standard
 )
@@ -85,7 +98,7 @@ python main.py ^
     --model_dir ./model/cv ^
     --eval_dir ./eval/cv ^
     --max_seq_len 128 ^
-    --num_train_epochs 3 ^
+    --num_train_epochs 5 ^
     --train_batch_size 16 ^
     --learning_rate 2e-5 ^
     --save_epochs 1 ^
@@ -94,8 +107,51 @@ python main.py ^
     --do_eval
 exit /b 0
 
+:train_duo
+echo Starting duo-classifier training...
+python main.py ^
+    --model_name_or_path bert-base-uncased ^
+    --task semeval ^
+    --train_file train.tsv ^
+    --test_file test.tsv ^
+    --data_dir ./data ^
+    --model_dir ./model/duo ^
+    --eval_dir ./eval/duo ^
+    --max_seq_len 128 ^
+    --num_train_epochs 5 ^
+    --train_batch_size 16 ^
+    --learning_rate 2e-5 ^
+    --save_epochs 1 ^
+    --duo_classifier ^
+    --binary_threshold 0.5 ^
+    --do_train ^
+    --do_eval
+exit /b 0
+
+:train_duo_cv
+echo Starting duo-classifier training with cross-validation...
+python main.py ^
+    --model_name_or_path bert-base-uncased ^
+    --task semeval ^
+    --train_file train.tsv ^
+    --test_file test.tsv ^
+    --data_dir ./data ^
+    --model_dir ./model/duo_cv ^
+    --eval_dir ./eval/duo_cv ^
+    --max_seq_len 128 ^
+    --num_train_epochs 5 ^
+    --train_batch_size 16 ^
+    --learning_rate 2e-5 ^
+    --save_epochs 1 ^
+    --duo_classifier ^
+    --binary_threshold 0.5 ^
+    --k_folds 5 ^
+    --do_train ^
+    --do_eval
+exit /b 0
+
 :evaluate_model
-echo Evaluating model...
+echo Evaluating standard model...
 python main.py ^
     --model_name_or_path bert-base-uncased ^
     --task semeval ^
@@ -104,6 +160,56 @@ python main.py ^
     --model_dir ./model/standard ^
     --eval_dir ./eval/evaluation ^
     --max_seq_len 128 ^
+    --do_eval ^
+    --do_dev_eval
+exit /b 0
+
+:evaluate_cv_model
+echo Evaluating cross-validation model...
+python main.py ^
+    --model_name_or_path bert-base-uncased ^
+    --task semeval ^
+    --test_file test.tsv ^
+    --data_dir ./data ^
+    --model_dir ./model/cv ^
+    --eval_dir ./eval/cv_evaluation ^
+    --max_seq_len 128 ^
+    --k_folds 5 ^
+    --do_eval ^
+    --do_dev_eval
+exit /b 0
+
+:evaluate_duo
+echo Evaluating duo-classifier model...
+python main.py ^
+    --model_name_or_path bert-base-uncased ^
+    --task semeval ^
+    --test_file test.tsv ^
+    --data_dir ./data ^
+    --model_dir ./model/duo/relation ^
+    --binary_model_dir ./model/duo/binary ^
+    --eval_dir ./eval/duo_evaluation ^
+    --max_seq_len 128 ^
+    --duo_classifier ^
+    --binary_threshold 0.5 ^
+    --do_eval ^
+    --do_dev_eval
+exit /b 0
+
+:evaluate_duo_cv
+echo Evaluating duo-classifier cross-validation model...
+python main.py ^
+    --model_name_or_path bert-base-uncased ^
+    --task semeval ^
+    --test_file test.tsv ^
+    --data_dir ./data ^
+    --model_dir ./model/duo_cv/relation ^
+    --binary_model_dir ./model/duo_cv/binary ^
+    --eval_dir ./eval/duo_cv_evaluation ^
+    --max_seq_len 128 ^
+    --duo_classifier ^
+    --binary_threshold 0.5 ^
+    --k_folds 5 ^
     --do_eval ^
     --do_dev_eval
 exit /b 0

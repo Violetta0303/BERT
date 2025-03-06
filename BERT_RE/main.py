@@ -3,11 +3,101 @@ import os
 import logging
 from pathlib import Path
 import sys
+import copy
+import numpy as np
+import torch
+from torch.utils.data import TensorDataset, Subset
 from data_loader import load_and_cache_examples, SemEvalProcessor
 from trainer import Trainer
 from utils import init_logger, load_tokenizer, set_seed
+from transformers import BertConfig
+from model import RBERT
 
 logger = logging.getLogger(__name__)
+
+
+def filter_dataset_with_binary_classifier(args, binary_model, dataset, device):
+    """
+    Filter a dataset using predictions from a binary classifier.
+    Only samples predicted as having relations (class 1) are kept.
+
+    Args:
+        args: Command-line arguments
+        binary_model: Trained binary classifier model
+        dataset: Dataset to filter
+        device: Device to run inference on
+
+    Returns:
+        Filtered dataset containing only samples predicted to have relations
+    """
+    from torch.utils.data import DataLoader, SequentialSampler
+
+    logger.info(f"Filtering dataset with binary classifier")
+    logger.info(f"Original dataset size: {len(dataset)}")
+
+    # Set model to evaluation mode
+    binary_model.eval()
+
+    # Create dataloader
+    sampler = SequentialSampler(dataset)
+    dataloader = DataLoader(dataset, sampler=sampler, batch_size=args.eval_batch_size)
+
+    # Get predictions from binary classifier
+    binary_preds = []
+    original_indices = []
+
+    for i, batch in enumerate(dataloader):
+        batch = tuple(t.to(device) for t in batch)
+
+        # Extract inputs
+        inputs = {
+            "input_ids": batch[0],
+            "attention_mask": batch[1],
+            "token_type_ids": batch[2],
+            "labels": None,
+            "e1_mask": batch[4],
+            "e2_mask": batch[5],
+        }
+
+        # Get predictions
+        with torch.no_grad():
+            outputs = binary_model(**inputs)
+            logits = outputs[0]
+            probs = torch.softmax(logits, dim=1)
+            predictions = (probs[:, 1] > args.binary_threshold).cpu().numpy()
+
+            # Store predictions and original indices
+            binary_preds.extend(predictions)
+            batch_indices = list(range(i * args.eval_batch_size, min((i + 1) * args.eval_batch_size, len(dataset))))
+            original_indices.extend(batch_indices)
+
+    # Find indices of positive samples (predicted to have relations)
+    positive_indices = [idx for idx, pred in zip(original_indices, binary_preds) if pred]
+
+    # Get labels of filtered samples for statistics
+    filtered_labels = [dataset[idx][3].item() for idx in positive_indices]
+    binary_truth = [(label > 0) for label in filtered_labels]
+
+    # Calculate statistics
+    total_samples = len(dataset)
+    positive_samples = len(positive_indices)
+    negative_samples = total_samples - positive_samples
+    true_relations = sum(1 for label in [dataset[i][3].item() for i in range(len(dataset))] if label > 0)
+
+    logger.info(f"Binary classifier statistics:")
+    logger.info(
+        f"  Predicted positive (has relation): {positive_samples} ({positive_samples / total_samples * 100:.2f}%)")
+    logger.info(
+        f"  Predicted negative (no relation): {negative_samples} ({negative_samples / total_samples * 100:.2f}%)")
+    logger.info(f"  True positive (has relation): {true_relations} ({true_relations / total_samples * 100:.2f}%)")
+    logger.info(
+        f"  True negative (no relation): {total_samples - true_relations} ({(total_samples - true_relations) / total_samples * 100:.2f}%)")
+
+    # Create subset with only positive samples
+    filtered_dataset = Subset(dataset, positive_indices)
+    logger.info(f"Filtered dataset size: {len(filtered_dataset)}")
+
+    return filtered_dataset
 
 
 def main(args):
@@ -20,6 +110,16 @@ def main(args):
     except Exception as e:
         logger.error(f"Failed to load tokenizer: {e}")
         return
+
+    # Create binary dataset if duo-classifier mode is enabled
+    if args.duo_classifier:
+        binary_data_dir = os.path.join(args.data_dir, "binary")
+        processor = SemEvalProcessor(args)
+        processor.create_binary_dataset(binary_data_dir)
+        logger.info(f"Binary dataset created in {binary_data_dir}")
+
+        # Update args for later use with binary mode
+        args.binary_data_dir = binary_data_dir
 
     # Handle evaluation-only mode (no training)
     if args.do_eval and not args.do_train:
@@ -72,6 +172,11 @@ def main(args):
             logger.info("Evaluating on test set")
             trainer.evaluate("test", prefix="evaluation", save_cm=True)
 
+            # If duo-classifier mode is enabled, evaluate with the duo-classifier approach
+            if args.duo_classifier and args.binary_model_dir:
+                logger.info("Evaluating with duo-classifier approach")
+                trainer.evaluate_duo_classifier("test", prefix="duo_evaluation", save_cm=True)
+
             return
         except Exception as e:
             logger.error(f"Error in evaluation mode: {e}")
@@ -93,18 +198,106 @@ def main(args):
             train_dataset = load_and_cache_examples(args, tokenizer, mode="train")
             test_dataset = load_and_cache_examples(args, tokenizer, mode="test")
 
-            # Initialize trainer with full training dataset
-            trainer = Trainer(args, train_dataset=train_dataset, test_dataset=test_dataset)
+            # If using duo-classifier in CV mode
+            if args.duo_classifier:
+                logger.info("Training duo-classifier with cross-validation")
 
-            # Train with k-fold cross-validation (trainer will handle the fold splitting)
-            if args.do_train:
-                trainer.train()
+                # Save original args for later
+                orig_args = copy.deepcopy(args)
 
-            # Evaluate on test set
-            if args.do_eval:
-                trainer.evaluate("test", prefix="final_test", save_cm=True)
+                # Set up binary classifier training
+                binary_args = copy.deepcopy(args)
+                binary_args.binary_mode = True
+                binary_args.data_dir = args.binary_data_dir
+                binary_args.model_dir = os.path.join(args.model_dir, "binary")
+                binary_args.train_file = f"binary_{args.train_file}"
+                binary_args.test_file = f"binary_{args.test_file}"
+                binary_args.label_file = "binary_label.txt"
+
+                # Load binary datasets
+                binary_train_dataset = load_and_cache_examples(binary_args, tokenizer, mode="train")
+                binary_test_dataset = load_and_cache_examples(binary_args, tokenizer, mode="test")
+
+                # Train binary classifier with CV
+                binary_trainer = Trainer(binary_args, train_dataset=binary_train_dataset,
+                                         test_dataset=binary_test_dataset)
+                if args.do_train:
+                    binary_trainer.train()
+
+                # Load trained binary model for filtering
+                logger.info("Loading trained binary model to filter training data for relation classifier")
+                device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
+
+                # Filtered datasets for each fold
+                filtered_fold_datasets = {}
+
+                # For each fold in the binary model, filter the corresponding training data
+                for fold in range(args.k_folds):
+                    # Set binary model dir to the specific fold
+                    binary_fold_dir = os.path.join(binary_args.model_dir, f"fold_{fold}")
+
+                    # Find latest epoch in this fold
+                    epoch_dirs = [d for d in os.listdir(binary_fold_dir) if d.startswith("epoch_")]
+                    if not epoch_dirs:
+                        logger.error(f"No epoch directories found in {binary_fold_dir}")
+                        continue
+
+                    # Sort to find latest epoch
+                    epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs]
+                    latest_epoch = max(epoch_nums)
+                    latest_dir = os.path.join(binary_fold_dir, f"epoch_{latest_epoch}")
+
+                    # Load binary model for this fold
+                    binary_model_config = BertConfig.from_pretrained(
+                        os.path.join(latest_dir, "config.json"),
+                        num_labels=2
+                    )
+                    binary_fold_args = copy.deepcopy(binary_args)
+                    binary_fold_args.binary_mode = True
+
+                    binary_model = RBERT.from_pretrained(latest_dir, config=binary_model_config, args=binary_fold_args)
+                    binary_model.to(device)
+
+                    # Get fold training data
+                    cv_splits = binary_trainer.split_kfold(args.k_folds)
+                    train_fold_data, _ = cv_splits[fold]
+
+                    # Filter the training data for this fold
+                    filtered_train_data = filter_dataset_with_binary_classifier(
+                        args, binary_model, train_fold_data, device
+                    )
+
+                    # Store filtered dataset
+                    filtered_fold_datasets[fold] = filtered_train_data
+
+                # Initialize trainer for relation classifier using filtered data
+                relation_args = copy.deepcopy(orig_args)
+                relation_args.model_dir = os.path.join(args.model_dir, "relation")
+                relation_args.binary_model_dir = os.path.join(args.model_dir, "binary")
+
+                # Train relation classifier with filtered data for each fold
+                filtered_trainer = Trainer(relation_args, train_dataset=None, test_dataset=test_dataset)
+                if args.do_train:
+                    filtered_trainer.train_with_filtered_data(filtered_fold_datasets)
+
+                # Evaluate final model with duo-classifier approach
+                if args.do_eval:
+                    logger.info("Evaluating duo-classifier on test set")
+                    filtered_trainer.evaluate_duo_classifier("test", prefix="duo_final", save_cm=True)
+            else:
+                # Standard cross-validation (single classifier)
+                # Initialize trainer with full training dataset
+                trainer = Trainer(args, train_dataset=train_dataset, test_dataset=test_dataset)
+
+                # Train with k-fold cross-validation
+                if args.do_train:
+                    trainer.train()
+
+                # Evaluate on test set
+                if args.do_eval:
+                    trainer.evaluate("test", prefix="final_test", save_cm=True)
         else:
-            # Standard train/dev/test procedure
+            # Standard train/dev/test procedure (no cross-validation)
             logger.info("Standard training procedure (no cross-validation)")
 
             # Fix path construction
@@ -150,16 +343,84 @@ def main(args):
 
             test_dataset = load_and_cache_examples(args, tokenizer, mode="test")
 
-            # Initialize Trainer
-            trainer = Trainer(args, train_dataset=train_dataset, dev_dataset=dev_dataset, test_dataset=test_dataset)
+            # If duo-classifier is enabled
+            if args.duo_classifier:
+                logger.info("Training duo-classifier")
 
-            # Train model
-            if args.do_train:
-                trainer.train()
+                # Save original args for later
+                orig_args = copy.deepcopy(args)
 
-            # Evaluate model
-            if args.do_eval:
-                trainer.evaluate("test", prefix="final_test", save_cm=True)
+                # Set up binary classifier training
+                binary_args = copy.deepcopy(args)
+                binary_args.binary_mode = True
+                binary_args.data_dir = args.binary_data_dir
+                binary_args.model_dir = os.path.join(args.model_dir, "binary")
+                binary_args.train_file = f"binary_{args.train_file}"
+                binary_args.test_file = f"binary_{args.test_file}"
+                binary_args.label_file = "binary_label.txt"
+
+                # Load binary datasets
+                binary_train_dataset = load_and_cache_examples(binary_args, tokenizer, mode="train")
+                binary_test_dataset = load_and_cache_examples(binary_args, tokenizer, mode="test")
+
+                # Train binary classifier
+                binary_trainer = Trainer(binary_args, train_dataset=binary_train_dataset,
+                                         dev_dataset=None, test_dataset=binary_test_dataset)
+                if args.do_train:
+                    binary_trainer.train()
+
+                # Load trained binary model for filtering
+                logger.info("Loading trained binary model to filter training data for relation classifier")
+
+                # Find the model dir - either in epoch directory or direct
+                binary_model_dir = binary_args.model_dir
+                epoch_dirs = [d for d in os.listdir(binary_model_dir) if d.startswith("epoch_")]
+                if epoch_dirs:
+                    epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs]
+                    latest_epoch = max(epoch_nums)
+                    binary_model_dir = os.path.join(binary_model_dir, f"epoch_{latest_epoch}")
+
+                # Update config for binary model
+                binary_config = BertConfig.from_pretrained(
+                    os.path.join(binary_model_dir, "config.json"),
+                    num_labels=2
+                )
+
+                device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
+                binary_model = RBERT.from_pretrained(binary_model_dir, config=binary_config, args=binary_args)
+                binary_model.to(device)
+
+                # Filter training data using binary classifier
+                filtered_train_dataset = filter_dataset_with_binary_classifier(
+                    args, binary_model, train_dataset, device
+                )
+
+                # Set up relation classifier training with filtered data
+                relation_args = copy.deepcopy(orig_args)
+                relation_args.model_dir = os.path.join(args.model_dir, "relation")
+                relation_args.binary_model_dir = binary_args.model_dir
+
+                # Train relation classifier on filtered data
+                relation_trainer = Trainer(relation_args, train_dataset=filtered_train_dataset,
+                                           dev_dataset=dev_dataset, test_dataset=test_dataset)
+                if args.do_train:
+                    relation_trainer.train()
+
+                # Evaluate with duo-classifier approach
+                if args.do_eval:
+                    relation_trainer.evaluate_duo_classifier("test", prefix="duo_final", save_cm=True)
+            else:
+                # Standard single-classifier training
+                # Initialize Trainer
+                trainer = Trainer(args, train_dataset=train_dataset, dev_dataset=dev_dataset, test_dataset=test_dataset)
+
+                # Train model
+                if args.do_train:
+                    trainer.train()
+
+                # Evaluate model
+                if args.do_eval:
+                    trainer.evaluate("test", prefix="final_test", save_cm=True)
     except Exception as e:
         logger.error(f"Error in main function: {e}")
         import traceback
@@ -186,7 +447,7 @@ if __name__ == "__main__":
 
     # Training hyperparameters
     parser.add_argument("--seed", type=int, default=77, help="Random seed for reproducibility")
-    parser.add_argument("--train_batch_size", default=16, type=int, help="Batch size for training")
+    parser.add_argument("--train_batch_size", default=32, type=int, help="Batch size for training")
     parser.add_argument("--eval_batch_size", default=32, type=int, help="Batch size for evaluation")
     parser.add_argument("--max_seq_len", default=128, type=int, help="Maximum input sequence length")
 
@@ -214,6 +475,12 @@ if __name__ == "__main__":
 
     # K-Fold cross-validation
     parser.add_argument("--k_folds", type=int, default=1, help="Number of folds for cross-validation (default: 1)")
+
+    # Duo-classifier options
+    parser.add_argument("--duo_classifier", action="store_true", help="Use duo-classifier approach (binary + relation)")
+    parser.add_argument("--binary_model_dir", type=str, default="",
+                        help="Path to binary classifier model (for evaluation)")
+    parser.add_argument("--binary_threshold", type=float, default=0.5, help="Threshold for binary classifier")
 
     args = parser.parse_args()
     main(args)

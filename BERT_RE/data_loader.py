@@ -72,14 +72,8 @@ class SemEvalProcessor:
     def __init__(self, args):
         self.args = args
         self.relation_labels = get_label(args)
+        self.binary_mode = hasattr(args, 'binary_mode') and args.binary_mode
 
-    # def _read_tsv(self, input_file):
-    #     """Reads a TSV file and returns the lines (excluding the header)."""
-    #     input_file = input_file.replace("\\", "/")  # Ensure compatibility across operating systems
-    #     with open(input_file, "r", encoding="utf-8") as f:
-    #         reader = csv.reader(f, delimiter="\t")
-    #         lines = list(reader)
-    #         return lines[1:]  # Skip header row
     def _read_tsv(self, input_file):
         """Reads a TSV file and ensures correct formatting."""
         with open(input_file, "r", encoding="utf-8") as f:
@@ -98,6 +92,12 @@ class SemEvalProcessor:
             guid = f"{set_type}-{i}"
             text_a = line[0]  # Sentence
             label = int(line[1])  # Convert relation ID to integer
+
+            # For binary mode, convert multi-class labels to binary
+            # 0 remains "Other" (no relation), all other classes become 1 (has relation)
+            if self.binary_mode and label > 0:
+                label = 1
+
             examples.append(InputExample(guid=guid, text_a=text_a, label=label))
         return examples
 
@@ -167,22 +167,97 @@ class SemEvalProcessor:
 
         logger.info(f"K-Fold data split completed with {k} folds.")
 
+    def create_binary_dataset(self, output_dir):
+        """
+        Creates a binary version of the dataset by converting all relation classes
+        (except 'Other') to a single 'Has-Relation' class.
+
+        Args:
+            output_dir: Directory to save the binary datasets
+        """
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Process each file type
+        for file_type in ["train", "test"]:
+            file_name = getattr(self.args, f"{file_type}_file")
+            file_path = os.path.join(self.args.data_dir, file_name).replace("\\", "/")
+
+            if not os.path.exists(file_path):
+                logger.warning(f"File not found: {file_path}, skipping binary conversion")
+                continue
+
+            lines = self._read_tsv(file_path)
+            binary_lines = []
+
+            # Convert labels to binary (0: No Relation, 1: Has Relation)
+            for line in lines:
+                if len(line) >= 2:
+                    sentence = line[0]
+                    label = int(line[1])
+                    # Convert to binary label: 0 stays 0, everything else becomes 1
+                    binary_label = 1 if label > 0 else 0
+                    binary_lines.append([sentence, str(binary_label)])
+
+            # Save binary dataset
+            binary_file = os.path.join(output_dir, f"binary_{file_name}").replace("\\", "/")
+            with open(binary_file, "w", encoding="utf-8") as f:
+                writer = csv.writer(f, delimiter="\t")
+                writer.writerow(["sentence", "relation"])
+                writer.writerows(binary_lines)
+
+            logger.info(f"Created binary dataset: {binary_file} with {len(binary_lines)} examples")
+
+        # Also create binary label file
+        binary_label_file = os.path.join(output_dir, "binary_label.txt").replace("\\", "/")
+        with open(binary_label_file, "w", encoding="utf-8") as f:
+            f.write("No-Relation\n")
+            f.write("Has-Relation\n")
+
+        logger.info(f"Created binary label file: {binary_label_file}")
+
+        # Handle cross-validation files if they exist
+        for i in range(5):  # Try up to 5 CV files
+            for prefix in ["train_k_", "dev_k_"]:
+                cv_file = f"{prefix}{i}.tsv"
+                cv_path = os.path.join(self.args.data_dir, cv_file).replace("\\", "/")
+
+                if not os.path.exists(cv_path):
+                    continue
+
+                cv_lines = self._read_tsv(cv_path)
+                binary_cv_lines = []
+
+                for line in cv_lines:
+                    if len(line) >= 2:
+                        sentence = line[0]
+                        label = int(line[1])
+                        binary_label = 1 if label > 0 else 0
+                        binary_cv_lines.append([sentence, str(binary_label)])
+
+                binary_cv_file = os.path.join(output_dir, f"binary_{cv_file}").replace("\\", "/")
+                with open(binary_cv_file, "w", encoding="utf-8") as f:
+                    writer = csv.writer(f, delimiter="\t")
+                    writer.writerow(["sentence", "relation"])
+                    writer.writerows(binary_cv_lines)
+
+                logger.info(f"Created binary dataset: {binary_cv_file} with {len(binary_cv_lines)} examples")
+
 
 processors = {"semeval": SemEvalProcessor}
 
 
 def convert_examples_to_features(
-    examples,
-    max_seq_len,
-    tokenizer,
-    cls_token="[CLS]",
-    cls_token_segment_id=0,
-    sep_token="[SEP]",
-    pad_token=0,
-    pad_token_segment_id=0,
-    sequence_a_segment_id=0,
-    add_sep_token=False,
-    mask_padding_with_zero=True,
+        examples,
+        max_seq_len,
+        tokenizer,
+        cls_token="[CLS]",
+        cls_token_segment_id=0,
+        sep_token="[SEP]",
+        pad_token=0,
+        pad_token_segment_id=0,
+        sequence_a_segment_id=0,
+        add_sep_token=False,
+        mask_padding_with_zero=True,
 ):
     """
     Converts InputExample instances into tokenised input features.
@@ -371,4 +446,3 @@ def load_and_cache_examples(args, tokenizer, mode, file_override=None):
         else:
             # Re-raise for train and test modes
             raise
-
