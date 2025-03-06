@@ -22,25 +22,77 @@ def get_args(pred_config):
 
 
 def load_model(pred_config, args, device):
-    # Check whether model exists
-    if not os.path.exists(pred_config.model_dir):
-        raise Exception("Model doesn't exists! Train first!")
+    """
+    Load model from directory, prioritizing best model if available.
 
-    try:
-        model = RBERT.from_pretrained(pred_config.model_dir, args=args)
-        model.to(device)
-        model.eval()
-        logger.info("***** Model Loaded *****")
-    except Exception as e:
-        logger.error(f"Error loading model: {e}")
-        raise Exception("Some model files might be missing...")
+    Args:
+        pred_config: Prediction configuration
+        args: Training arguments
+        device: Device to run inference on
 
-    return model
+    Returns:
+        Loaded model
+    """
+    # Try to find the best model first
+    best_dir = os.path.join(pred_config.model_dir, "best")
+    if os.path.exists(best_dir) and os.path.exists(os.path.join(best_dir, "config.json")):
+        try:
+            logger.info("Loading best model...")
+            model = RBERT.from_pretrained(best_dir, args=args)
+            model.to(device)
+            model.eval()
+            logger.info("***** Best Model Loaded *****")
+            return model
+        except Exception as e:
+            logger.warning(f"Failed to load best model: {e}")
+
+    # Try to find the final model
+    final_dir = os.path.join(pred_config.model_dir, "epoch_final")
+    if os.path.exists(final_dir) and os.path.exists(os.path.join(final_dir, "config.json")):
+        try:
+            logger.info("Loading final model...")
+            model = RBERT.from_pretrained(final_dir, args=args)
+            model.to(device)
+            model.eval()
+            logger.info("***** Final Model Loaded *****")
+            return model
+        except Exception as e:
+            logger.warning(f"Failed to load final model: {e}")
+
+    # Check for any fold's best model (if using CV)
+    for fold in range(5):  # Try up to 5 folds
+        fold_best_dir = os.path.join(pred_config.model_dir, f"fold_{fold}_best")
+        if os.path.exists(fold_best_dir) and os.path.exists(os.path.join(fold_best_dir, "config.json")):
+            try:
+                logger.info(f"Loading best model from fold {fold}...")
+                model = RBERT.from_pretrained(fold_best_dir, args=args)
+                model.to(device)
+                model.eval()
+                logger.info(f"***** Best Model for Fold {fold} Loaded *****")
+                return model
+            except Exception as e:
+                logger.warning(f"Failed to load best model for fold {fold}: {e}")
+
+    # If no best model found, try original path directly
+    if os.path.exists(pred_config.model_dir) and os.path.exists(os.path.join(pred_config.model_dir, "config.json")):
+        try:
+            logger.info(f"Loading model from direct path: {pred_config.model_dir}")
+            model = RBERT.from_pretrained(pred_config.model_dir, args=args)
+            model.to(device)
+            model.eval()
+            logger.info("***** Model Loaded from Direct Path *****")
+            return model
+        except Exception as e:
+            logger.error(f"Failed to load model from direct path: {e}")
+
+    # If we get here, no model found
+    raise Exception("No model files found. Please check your model directory.")
 
 
 def load_duo_classifier(pred_config, args, device):
     """
     Load both binary and relation classifiers for duo-classifier prediction.
+    Prioritizes loading the best models for both classifiers.
 
     Args:
         pred_config: Prediction configuration
@@ -58,34 +110,71 @@ def load_duo_classifier(pred_config, args, device):
     if not os.path.exists(pred_config.binary_model_dir):
         raise Exception("Binary model doesn't exist! Train binary model first!")
 
-    # Load relation model
+    # Load relation model (using the updated load_model function)
     relation_model = load_model(pred_config, args, device)
 
     # Set binary mode for loading binary model
     binary_args = argparse.Namespace(**vars(args))
     binary_args.binary_mode = True
 
-    try:
-        # Load binary model
-        binary_model = RBERT.from_pretrained(pred_config.binary_model_dir, args=binary_args)
-        binary_model.to(device)
-        binary_model.eval()
-        logger.info("***** Binary Model Loaded *****")
+    # Try to find the best binary model first
+    binary_model = None
+    model_paths_to_try = [
+        os.path.join(pred_config.binary_model_dir, "best"),  # Best model
+        os.path.join(pred_config.binary_model_dir, "epoch_final"),  # Final epoch
+        pred_config.binary_model_dir  # Direct path
+    ]
 
-        # Create duo classifier
-        duo_classifier = DuoClassifier(
-            binary_model=binary_model,
-            relation_model=relation_model,
-            device=device,
-            binary_threshold=pred_config.binary_threshold
-        )
-        logger.info("***** Duo-Classifier Created *****")
-        logger.info(f"Binary threshold: {pred_config.binary_threshold}")
+    # Also check fold-specific best models
+    for fold in range(5):  # Try up to 5 folds
+        model_paths_to_try.append(os.path.join(pred_config.binary_model_dir, f"fold_{fold}_best"))
 
-        return duo_classifier
-    except Exception as e:
-        logger.error(f"Error loading binary model: {e}")
-        raise Exception("Some binary model files might be missing...")
+    # Try each path in order
+    for binary_path in model_paths_to_try:
+        if os.path.exists(binary_path) and os.path.exists(os.path.join(binary_path, "config.json")):
+            try:
+                logger.info(f"Loading binary model from: {binary_path}")
+                binary_model = RBERT.from_pretrained(binary_path, args=binary_args)
+                binary_model.to(device)
+                binary_model.eval()
+                logger.info("***** Binary Model Loaded *****")
+                break
+            except Exception as e:
+                logger.warning(f"Failed to load binary model from {binary_path}: {e}")
+
+    if binary_model is None:
+        # If still no model found, check if there are any epoch directories
+        try:
+            epoch_dirs = [d for d in os.listdir(pred_config.binary_model_dir) if d.startswith("epoch_")]
+            if epoch_dirs:
+                # Sort and use latest epoch
+                epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs if d.split("_")[1].isdigit()]
+                if epoch_nums:
+                    latest_epoch = max(epoch_nums)
+                    latest_path = os.path.join(pred_config.binary_model_dir, f"epoch_{latest_epoch}")
+
+                    logger.info(f"Loading binary model from latest epoch: {latest_path}")
+                    binary_model = RBERT.from_pretrained(latest_path, args=binary_args)
+                    binary_model.to(device)
+                    binary_model.eval()
+                    logger.info("***** Binary Model Loaded from Latest Epoch *****")
+        except Exception as e:
+            logger.error(f"Error looking for epoch directories: {e}")
+
+    if binary_model is None:
+        raise Exception("Could not find any binary model to load")
+
+    # Create duo classifier
+    duo_classifier = DuoClassifier(
+        binary_model=binary_model,
+        relation_model=relation_model,
+        device=device,
+        binary_threshold=pred_config.binary_threshold
+    )
+    logger.info("***** Duo-Classifier Created *****")
+    logger.info(f"Binary threshold: {pred_config.binary_threshold}")
+
+    return duo_classifier
 
 
 def convert_input_file_to_tensor_dataset(

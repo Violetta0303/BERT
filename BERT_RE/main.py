@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import TensorDataset, Subset
 from data_loader import load_and_cache_examples, SemEvalProcessor
 from trainer import Trainer
-from utils import init_logger, load_tokenizer, set_seed
+from utils import init_logger, load_tokenizer, set_seed, cleanup_models
 from transformers import BertConfig
 from model import RBERT
 
@@ -234,29 +234,52 @@ def main(args):
                 # For each fold in the binary model, filter the corresponding training data
                 for fold in range(args.k_folds):
                     # Set binary model dir to the specific fold
-                    binary_fold_dir = os.path.join(binary_args.model_dir, f"fold_{fold}")
+                    # First look for the best fold model
+                    binary_fold_dir = os.path.join(binary_args.model_dir, f"fold_{fold}_best")
+                    if not os.path.exists(binary_fold_dir):
+                        # If best model not found, try final epoch
+                        binary_fold_dir = os.path.join(binary_args.model_dir, f"fold_{fold}/epoch_final")
+                        if not os.path.exists(binary_fold_dir):
+                            # Look for any epoch directory
+                            fold_dir = os.path.join(binary_args.model_dir, f"fold_{fold}")
+                            if not os.path.exists(fold_dir):
+                                logger.error(f"No binary model found for fold {fold}")
+                                continue
 
-                    # Find latest epoch in this fold
-                    epoch_dirs = [d for d in os.listdir(binary_fold_dir) if d.startswith("epoch_")]
-                    if not epoch_dirs:
-                        logger.error(f"No epoch directories found in {binary_fold_dir}")
+                            epoch_dirs = [d for d in os.listdir(fold_dir) if d.startswith("epoch_")]
+                            if not epoch_dirs:
+                                logger.error(f"No epoch directories found in {fold_dir}")
+                                continue
+
+                            # Sort to find latest epoch
+                            epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs if d.split("_")[1].isdigit()]
+                            if not epoch_nums:
+                                logger.error(f"No valid epoch directories found in {fold_dir}")
+                                continue
+
+                            latest_epoch = max(epoch_nums)
+                            binary_fold_dir = os.path.join(fold_dir, f"epoch_{latest_epoch}")
+
+                    # Verify model directory exists
+                    if not os.path.exists(binary_fold_dir):
+                        logger.error(f"Binary model directory not found: {binary_fold_dir}")
                         continue
 
-                    # Sort to find latest epoch
-                    epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs]
-                    latest_epoch = max(epoch_nums)
-                    latest_dir = os.path.join(binary_fold_dir, f"epoch_{latest_epoch}")
+                    # Load binary model config
+                    try:
+                        binary_model_config = BertConfig.from_pretrained(
+                            os.path.join(binary_fold_dir, "config.json"),
+                            num_labels=2
+                        )
+                        binary_fold_args = copy.deepcopy(binary_args)
+                        binary_fold_args.binary_mode = True
 
-                    # Load binary model for this fold
-                    binary_model_config = BertConfig.from_pretrained(
-                        os.path.join(latest_dir, "config.json"),
-                        num_labels=2
-                    )
-                    binary_fold_args = copy.deepcopy(binary_args)
-                    binary_fold_args.binary_mode = True
-
-                    binary_model = RBERT.from_pretrained(latest_dir, config=binary_model_config, args=binary_fold_args)
-                    binary_model.to(device)
+                        binary_model = RBERT.from_pretrained(binary_fold_dir, config=binary_model_config,
+                                                             args=binary_fold_args)
+                        binary_model.to(device)
+                    except Exception as e:
+                        logger.error(f"Failed to load binary model for fold {fold}: {e}")
+                        continue
 
                     # Get fold training data
                     cv_splits = binary_trainer.split_kfold(args.k_folds)
@@ -372,13 +395,14 @@ def main(args):
                 # Load trained binary model for filtering
                 logger.info("Loading trained binary model to filter training data for relation classifier")
 
-                # Find the model dir - either in epoch directory or direct
-                binary_model_dir = binary_args.model_dir
-                epoch_dirs = [d for d in os.listdir(binary_model_dir) if d.startswith("epoch_")]
-                if epoch_dirs:
-                    epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs]
-                    latest_epoch = max(epoch_nums)
-                    binary_model_dir = os.path.join(binary_model_dir, f"epoch_{latest_epoch}")
+                # Try to find the best model first
+                binary_model_dir = os.path.join(binary_args.model_dir, "best")
+                if not os.path.exists(binary_model_dir):
+                    # Try final epoch
+                    binary_model_dir = os.path.join(binary_args.model_dir, "epoch_final")
+                    if not os.path.exists(binary_model_dir):
+                        # Use the main directory
+                        binary_model_dir = binary_args.model_dir
 
                 # Update config for binary model
                 binary_config = BertConfig.from_pretrained(
@@ -425,6 +449,24 @@ def main(args):
         logger.error(f"Error in main function: {e}")
         import traceback
         logger.error(traceback.format_exc())
+
+    # Cleanup old model files if requested
+    if hasattr(args, 'cleanup_models') and args.cleanup_models:
+        logger.info("Cleaning up model directories to save space...")
+
+        # Cleanup main model directory
+        cleanup_count = cleanup_models(args.model_dir,
+                                       keep_best=True,
+                                       keep_final=True)
+
+        # If duo-classifier mode, also cleanup binary model directory
+        if args.duo_classifier and hasattr(args, 'binary_model_dir') and args.binary_model_dir:
+            binary_cleanup_count = cleanup_models(args.binary_model_dir,
+                                                  keep_best=True,
+                                                  keep_final=True)
+            cleanup_count += binary_cleanup_count
+
+        logger.info(f"Model cleanup complete. Removed {cleanup_count} directories.")
 
 
 if __name__ == "__main__":
@@ -481,6 +523,10 @@ if __name__ == "__main__":
     parser.add_argument("--binary_model_dir", type=str, default="",
                         help="Path to binary classifier model (for evaluation)")
     parser.add_argument("--binary_threshold", type=float, default=0.5, help="Threshold for binary classifier")
+
+    # Model cleanup option
+    parser.add_argument("--cleanup_models", action="store_true",
+                        help="Clean up intermediate model files, keeping only best and final models")
 
     args = parser.parse_args()
     main(args)

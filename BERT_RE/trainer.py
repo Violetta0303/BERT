@@ -639,10 +639,76 @@ class Trainer(object):
 
         return result
 
+    def load_model(self):
+        """
+        Loads the model, prioritizing the best model if available.
+        """
+        try:
+            # Check if using cross-validation
+            is_cv = hasattr(self.args, 'k_folds') and self.args.k_folds > 1
+
+            # For both CV and standard training, try best model first
+            if is_cv:
+                # For CV, try fold-specific best model first
+                for fold_idx in range(self.args.k_folds):
+                    best_dir = os.path.join(self.args.model_dir, f"fold_{fold_idx}_best")
+                    if os.path.exists(best_dir):
+                        logger.info(f"Found best model directory for fold {fold_idx}: {best_dir}")
+                        self.model = RBERT.from_pretrained(best_dir, config=self.config, args=self.args)
+                        self.model.to(self.device)
+                        logger.info(f"Loaded best model for fold {fold_idx}")
+                        return
+
+            # Try best model directory (non-fold-specific)
+            best_dir = os.path.join(self.args.model_dir, "best")
+            if os.path.exists(best_dir):
+                logger.info(f"Found best model directory: {best_dir}")
+                self.model = RBERT.from_pretrained(best_dir, config=self.config, args=self.args)
+                self.model.to(self.device)
+                logger.info("Loaded best model")
+                return
+
+            # Try final epoch
+            final_dir = os.path.join(self.args.model_dir, "epoch_final")
+            if os.path.exists(final_dir):
+                logger.info(f"Found final epoch directory: {final_dir}")
+                self.model = RBERT.from_pretrained(final_dir, config=self.config, args=self.args)
+                self.model.to(self.device)
+                logger.info("Loaded final epoch model")
+                return
+
+            # Try fold-specific final models (for CV)
+            if is_cv:
+                for fold_idx in range(self.args.k_folds):
+                    final_dir = os.path.join(self.args.model_dir, f"fold_{fold_idx}/epoch_final")
+                    if os.path.exists(final_dir):
+                        logger.info(f"Found final epoch directory for fold {fold_idx}: {final_dir}")
+                        self.model = RBERT.from_pretrained(final_dir, config=self.config, args=self.args)
+                        self.model.to(self.device)
+                        logger.info(f"Loaded final epoch model for fold {fold_idx}")
+                        return
+
+            # Try model_dir directly
+            if os.path.exists(os.path.join(self.args.model_dir, "config.json")):
+                logger.info(f"Loading model from: {self.args.model_dir}")
+                self.model = RBERT.from_pretrained(self.args.model_dir, config=self.config, args=self.args)
+                self.model.to(self.device)
+                logger.info("Loaded model from model_dir")
+                return
+
+            # If we got here, no model was found
+            raise FileNotFoundError(f"No model found in {self.args.model_dir}")
+
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise e
+
     def _load_duo_classifier(self):
         """
         Loads the binary and relation classifier models for duo-classifier evaluation.
-        Handles both standard models and cross-validation models with epoch subdirectories.
+        Prioritizes loading the best models.
         """
         try:
             # Check if binary model path is specified
@@ -660,68 +726,82 @@ class Trainer(object):
             is_cv = hasattr(self.args, 'k_folds') and self.args.k_folds > 1
 
             if is_cv:
-                # For each fold, try to find the latest epoch directory
-                for fold_idx in range(5):  # Try up to 5 folds
-                    fold_dir = os.path.join(self.args.binary_model_dir, f"fold_{fold_idx}")
-                    if not os.path.exists(fold_dir):
-                        continue
+                # For CV, try fold-specific best model first
+                for fold_idx in range(self.args.k_folds):
+                    best_dir = os.path.join(self.args.binary_model_dir, f"fold_{fold_idx}_best")
+                    if os.path.exists(best_dir):
+                        config_path = os.path.join(best_dir, "config.json")
+                        if os.path.exists(config_path):
+                            logger.info(f"Found best binary model for fold {fold_idx}")
+                            binary_config_path = config_path
+                            binary_model_dir = best_dir
+                            break
 
-                    logger.info(f"Checking fold directory: {fold_dir}")
-
-                    # List all epoch directories in this fold
-                    epoch_dirs = [d for d in os.listdir(fold_dir) if d.startswith("epoch_")]
-                    if not epoch_dirs:
-                        continue
-
-                    # Sort epoch directories to find the latest
-                    # Extract epoch numbers and sort numerically
-                    epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs]
-                    latest_epoch = max(epoch_nums)
-                    latest_epoch_dir = f"epoch_{latest_epoch}"
-
-                    # Full path to the latest epoch directory
-                    latest_dir = os.path.join(fold_dir, latest_epoch_dir)
-                    config_path = os.path.join(latest_dir, "config.json")
-
-                    logger.info(f"Checking for config at: {config_path}")
-
+            # Try best model directory (non-fold-specific)
+            if not binary_config_path:
+                best_dir = os.path.join(self.args.binary_model_dir, "best")
+                if os.path.exists(best_dir):
+                    config_path = os.path.join(best_dir, "config.json")
                     if os.path.exists(config_path):
-                        logger.info(f"Found binary model config in fold_{fold_idx}/{latest_epoch_dir}")
+                        logger.info("Found best binary model")
                         binary_config_path = config_path
-                        binary_model_dir = latest_dir
-                        break
+                        binary_model_dir = best_dir
 
-                if not binary_config_path:
-                    logger.error("Could not find config.json in any fold/epoch directory")
-                    return
-            else:
-                # Standard model - try direct path first
+            # Try final epoch
+            if not binary_config_path:
+                final_dir = os.path.join(self.args.binary_model_dir, "epoch_final")
+                if os.path.exists(final_dir):
+                    config_path = os.path.join(final_dir, "config.json")
+                    if os.path.exists(config_path):
+                        logger.info("Found final epoch binary model")
+                        binary_config_path = config_path
+                        binary_model_dir = final_dir
+
+            # Try fold-specific final models (for CV)
+            if not binary_config_path and is_cv:
+                for fold_idx in range(self.args.k_folds):
+                    final_dir = os.path.join(self.args.binary_model_dir, f"fold_{fold_idx}/epoch_final")
+                    if os.path.exists(final_dir):
+                        config_path = os.path.join(final_dir, "config.json")
+                        if os.path.exists(config_path):
+                            logger.info(f"Found final epoch binary model for fold {fold_idx}")
+                            binary_config_path = config_path
+                            binary_model_dir = final_dir
+                            break
+
+            # Try direct path
+            if not binary_config_path:
                 direct_config_path = os.path.join(self.args.binary_model_dir, "config.json")
                 if os.path.exists(direct_config_path):
+                    logger.info("Found binary model at specified path")
                     binary_config_path = direct_config_path
                     binary_model_dir = self.args.binary_model_dir
-                else:
-                    # If not found, look for epoch directories
-                    epoch_dirs = [d for d in os.listdir(self.args.binary_model_dir) if d.startswith("epoch_")]
-                    if epoch_dirs:
-                        # Sort and use latest epoch
-                        epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs]
-                        latest_epoch = max(epoch_nums)
-                        latest_epoch_dir = f"epoch_{latest_epoch}"
 
-                        latest_dir = os.path.join(self.args.binary_model_dir, latest_epoch_dir)
-                        config_path = os.path.join(latest_dir, "config.json")
+            # If all above fail, try to find any epoch directory
+            if not binary_config_path:
+                # If no direct config, look for epoch directories
+                epoch_dirs = [d for d in os.listdir(self.args.binary_model_dir) if d.startswith("epoch_")]
+                if epoch_dirs:
+                    # Sort and use latest epoch
+                    try:
+                        epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs if d.split("_")[1].isdigit()]
+                        if epoch_nums:
+                            latest_epoch = max(epoch_nums)
+                            latest_epoch_dir = f"epoch_{latest_epoch}"
 
-                        if os.path.exists(config_path):
-                            logger.info(f"Found binary model config in {latest_epoch_dir}")
-                            binary_config_path = config_path
-                            binary_model_dir = latest_dir
-                        else:
-                            logger.error(f"Config not found in latest epoch directory: {latest_dir}")
-                            return
-                    else:
-                        logger.error(f"No config.json or epoch directories found in {self.args.binary_model_dir}")
-                        return
+                            latest_dir = os.path.join(self.args.binary_model_dir, latest_epoch_dir)
+                            config_path = os.path.join(latest_dir, "config.json")
+
+                            if os.path.exists(config_path):
+                                logger.info(f"Found binary model config in {latest_epoch_dir}")
+                                binary_config_path = config_path
+                                binary_model_dir = latest_dir
+                    except Exception as e:
+                        logger.warning(f"Error processing epoch directories: {e}")
+
+            if not binary_config_path:
+                logger.error("Could not find any binary model")
+                return
 
             # Load the model configuration
             logger.info(f"Loading binary model config from: {binary_config_path}")
@@ -758,23 +838,30 @@ class Trainer(object):
             import traceback
             logger.error(traceback.format_exc())
 
-    def save_model(self, fold=None, epoch=None):
+    def save_model(self, fold=None, epoch=None, is_best=False):
         """
         Saves the model and training arguments.
 
         Args:
             fold (int, optional): Current fold number for cross-validation
             epoch (int, optional): Current epoch number
+            is_best (bool, optional): Whether this is the best model so far
         """
         # Create model directory
-        if fold is not None:
-            output_dir = os.path.join(self.args.model_dir, f"fold_{fold}")
-            if epoch is not None:
-                output_dir = os.path.join(output_dir, f"epoch_{epoch}")
-        elif epoch is not None:
-            output_dir = os.path.join(self.args.model_dir, f"epoch_{epoch}")
+        if is_best:
+            if fold is not None:
+                output_dir = os.path.join(self.args.model_dir, f"fold_{fold}_best")
+            else:
+                output_dir = os.path.join(self.args.model_dir, "best")
         else:
-            output_dir = self.args.model_dir
+            if fold is not None:
+                output_dir = os.path.join(self.args.model_dir, f"fold_{fold}")
+                if epoch is not None:
+                    output_dir = os.path.join(output_dir, f"epoch_{epoch}")
+            elif epoch is not None:
+                output_dir = os.path.join(self.args.model_dir, f"epoch_{epoch}")
+            else:
+                output_dir = self.args.model_dir
 
         os.makedirs(output_dir, exist_ok=True)
         logger.info(f"Saving model to {output_dir}")
@@ -1164,11 +1251,16 @@ class Trainer(object):
         else:
             kfold_splits = [(self.train_dataset, self.dev_dataset)]  # No k-fold, use entire dataset
 
-        # 初始化保存所有fold的损失（如果尚未初始化）
+        # Track best model for each fold
+        best_f1_scores = {}
+        for fold in range(len(kfold_splits)):
+            best_f1_scores[fold] = 0.0
+
+        # Initialize to save all fold losses
         if not hasattr(self, 'all_fold_losses'):
             self.all_fold_losses = {
-                'train': {},  # 格式: {fold: [loss1, loss2, ...]}
-                'val': {}  # 格式: {fold: [loss1, loss2, ...]}
+                'train': {},  # Format: {fold: [loss1, loss2, ...]}
+                'val': {}  # Format: {fold: [loss1, loss2, ...]}
             }
             self.last_train_loss = 0.0
 
@@ -1178,14 +1270,14 @@ class Trainer(object):
             logger.info(f"Training on Fold {fold + 1}/{len(kfold_splits)}")
             logger.info(f"{'=' * 50}")
 
-            # 记录验证集类型和大小
+            # Validate dev dataset
             if dev_dataset:
                 logger.info(f"Validation dataset type: {type(dev_dataset)}")
                 logger.info(f"Validation dataset size: {len(dev_dataset)}")
                 if isinstance(dev_dataset, torch.utils.data.Subset):
                     logger.info(f"  Subset of dataset with {len(dev_dataset.dataset)} total examples")
 
-                # 验证一些样本
+                # Validate some samples
                 try:
                     sample_size = min(3, len(dev_dataset))
                     sample_indices = range(sample_size)
@@ -1312,7 +1404,7 @@ class Trainer(object):
                 avg_train_loss = epoch_loss / steps_in_epoch
                 train_losses.append(avg_train_loss)
 
-                # 保存训练损失
+                # Save training loss
                 self.last_train_loss = avg_train_loss
                 if fold not in self.all_fold_losses['train']:
                     self.all_fold_losses['train'][fold] = []
@@ -1320,61 +1412,22 @@ class Trainer(object):
 
                 logger.info(f"Epoch {epoch + 1} - Avg. Training Loss: {avg_train_loss:.4f}")
 
-                # 在这里添加明确的损失日志
-                logger.info(f"Epoch {epoch + 1} - Training Loss: {avg_train_loss:.4f}")
-                if len(val_losses) > 0:
-                    latest_val_loss = val_losses[-1]
-                    logger.info(f"Epoch {epoch + 1} - Validation Loss: {latest_val_loss:.4f}")
-
-                # Check model parameters to ensure training is happening
-                param_norm_after_epoch = sum(p.norm().item() for p in self.model.parameters())
-                logger.info(f"Model parameter norm after epoch {epoch + 1}: {param_norm_after_epoch:.4f}")
-                if abs(param_norm_after_epoch - param_norm_before) < 1e-6:
-                    logger.warning("⚠️ Model parameters barely changed! Training may not be effective.")
-
                 # Evaluate after each epoch
                 if dev_dataset:
-                    # Debug the dev dataset content
-                    logger.info(f"Dev dataset for fold {fold + 1} has {len(dev_dataset)} examples")
-
-                    # Check a few labels if available
-                    sample_size = min(5, len(dev_dataset))
-                    try:
-                        if isinstance(dev_dataset, torch.utils.data.Subset):
-                            samples = [dev_dataset[i][3].item() for i in range(sample_size)]
-                        else:
-                            samples = [dev_dataset[i][3].item() for i in range(sample_size)]
-                        logger.info(f"Sample labels from dev dataset: {samples}")
-                    except Exception as e:
-                        logger.warning(f"Could not extract sample labels: {e}")
-
                     eval_results = self.evaluate("dev",
                                                  prefix=f"fold_{fold}_epoch_{epoch}" if self.args.k_folds > 1 else f"epoch_{epoch}")
                     val_losses.append(eval_results["loss"])
 
-                    # 保存验证损失
+                    # Save validation loss
                     if fold not in self.all_fold_losses['val']:
                         self.all_fold_losses['val'][fold] = []
                     self.all_fold_losses['val'][fold].append(eval_results["loss"])
 
-                    # Log evaluation results for debugging
-                    logger.info(f"Epoch {epoch + 1} - Validation results: " +
-                                f"Loss={eval_results['loss']:.4f}, " +
-                                f"Acc={eval_results['accuracy']:.4f}, " +
-                                f"F1={eval_results['f1_score']:.4f}")
-
-                    # Store all available metrics for plotting with debug info
-                    logger.info(f"Storing metrics for epoch {epoch + 1}: " +
-                                f"Acc={eval_results['accuracy']:.4f}, " +
-                                f"F1={eval_results['f1_score']:.4f}")
-
+                    # Store all available metrics for plotting
                     for metric in ['accuracy', 'precision', 'recall', 'f1_score']:
                         if metric in eval_results:
                             self.epoch_metrics[metric].append(eval_results[metric])
-                            # Add debug output
-                            logger.info(f"  Added {metric}={eval_results[metric]:.4f} to epoch_metrics")
                         else:
-                            # If metric doesn't exist, use placeholder
                             logger.warning(f"Metric '{metric}' not found in evaluation results")
                             self.epoch_metrics[metric].append(0.0)
 
@@ -1385,265 +1438,88 @@ class Trainer(object):
                         self.results_dir,
                         prefix=f"fold_{fold}_" if self.args.k_folds > 1 else ""
                     )
+
+                    # Check if this is the best F1-score for this fold
+                    current_f1 = eval_results.get('f1_score', 0.0)
+                    if current_f1 > best_f1_scores[fold]:
+                        logger.info(f"New best F1-score: {current_f1:.4f} (previous: {best_f1_scores[fold]:.4f})")
+                        best_f1_scores[fold] = current_f1
+                        # Save as the best model for this fold
+                        self.save_model(fold=fold if self.args.k_folds > 1 else None, is_best=True)
                 else:
-                    logger.info(
-                        f"Epoch {epoch + 1} - No dedicated validation dataset. Creating temporary validation set from training data...")
-
-                    # 从训练数据创建临时验证集
+                    # Create temporary validation set from training data
                     train_size = len(train_dataset)
-                    val_size = min(500, int(train_size * 0.1))  # 使用10%或最多500个样本
+                    val_size = min(500, int(train_size * 0.1))  # 10% or max 500 samples
 
-                    # 使用固定的种子但针对不同epoch/fold变化，确保重复性但每个epoch有不同样本
+                    # Use fixed seed but vary by epoch/fold for repeatability
                     np.random.seed(42 + fold * 100 + epoch)
                     val_indices = np.random.choice(train_size, val_size, replace=False)
                     temp_val_dataset = torch.utils.data.Subset(train_dataset, val_indices.tolist())
 
                     logger.info(f"Created temporary validation set with {len(temp_val_dataset)} samples")
 
-                    # 临时替换self.dev_dataset以便evaluate方法使用
+                    # Temporarily replace self.dev_dataset
                     original_dev_dataset = self.dev_dataset
                     self.dev_dataset = temp_val_dataset
 
                     try:
-                        # 使用临时验证集进行评估
+                        # Evaluate using temporary validation set
                         eval_results = self.evaluate("dev",
                                                      prefix=f"fold_{fold}_epoch_{epoch}" if self.args.k_folds > 1 else f"epoch_{epoch}")
                         val_losses.append(eval_results["loss"])
 
-                        # 保存验证损失
+                        # Save validation loss
                         if fold not in self.all_fold_losses['val']:
                             self.all_fold_losses['val'][fold] = []
                         self.all_fold_losses['val'][fold].append(eval_results["loss"])
 
-                        # 存储评估结果
-                        logger.info(f"Epoch {epoch + 1} - Temporary validation results: " +
-                                    f"Loss={eval_results['loss']:.4f}, " +
-                                    f"Acc={eval_results['accuracy']:.4f}, " +
-                                    f"Prec={eval_results['precision']:.4f}, " +
-                                    f"Rec={eval_results['recall']:.4f}, " +
-                                    f"F1={eval_results['f1_score']:.4f}")
-
+                        # Store evaluation metrics
                         for metric in ['accuracy', 'precision', 'recall', 'f1_score']:
                             if metric in eval_results:
                                 self.epoch_metrics[metric].append(eval_results[metric])
-                                logger.info(f"  Added {metric}={eval_results[metric]:.4f} to epoch_metrics")
                             else:
                                 logger.warning(f"Metric '{metric}' not found in evaluation results")
                                 self.epoch_metrics[metric].append(0.0)
 
-                        # 保存指标
+                        # Save metrics
                         save_epoch_metrics(
                             eval_results,
                             epoch + 1,
                             self.results_dir,
                             prefix=f"fold_{fold}_" if self.args.k_folds > 1 else ""
                         )
+
+                        # Check if this is the best F1-score for this fold
+                        current_f1 = eval_results.get('f1_score', 0.0)
+                        if current_f1 > best_f1_scores[fold]:
+                            logger.info(f"New best F1-score: {current_f1:.4f} (previous: {best_f1_scores[fold]:.4f})")
+                            best_f1_scores[fold] = current_f1
+                            # Save as the best model for this fold
+                            self.save_model(fold=fold if self.args.k_folds > 1 else None, is_best=True)
                     except Exception as e:
                         logger.error(f"Error during temporary validation: {e}")
-                        # 出错时使用合理但有差异的默认值
-                        default_acc = max(0.5, min(0.9, 1.0 - avg_train_loss))
-
-                        eval_results = {
-                            "loss": avg_train_loss * 1.05,  # 验证损失通常略高于训练损失
-                            "accuracy": default_acc,
-                            "precision": default_acc - 0.03,
-                            "recall": default_acc - 0.05,
-                            "f1_score": default_acc - 0.04
-                        }
-
-                        val_losses.append(eval_results["loss"])
-
-                        # 保存验证损失
-                        if fold not in self.all_fold_losses['val']:
-                            self.all_fold_losses['val'][fold] = []
-                        self.all_fold_losses['val'][fold].append(eval_results["loss"])
-
-                        # 保存指标
-                        for metric in ['accuracy', 'precision', 'recall', 'f1_score']:
-                            self.epoch_metrics[metric].append(eval_results[metric])
-
-                        logger.warning(f"Using fallback metrics due to error: {eval_results}")
-
-                        save_epoch_metrics(
-                            eval_results,
-                            epoch + 1,
-                            self.results_dir,
-                            prefix=f"fold_{fold}_" if self.args.k_folds > 1 else ""
-                        )
                     finally:
-                        # 恢复原始的dev_dataset
+                        # Restore original dev_dataset
                         self.dev_dataset = original_dev_dataset
 
-                # Save model checkpoint for the last epoch or periodically
-                if (epoch + 1) == int(self.args.num_train_epochs) or \
-                        (hasattr(self.args, 'save_epochs') and self.args.save_epochs > 0 and (
-                                epoch + 1) % self.args.save_epochs == 0):
-                    self.save_model(fold=fold if self.args.k_folds > 1 else None, epoch=epoch + 1)
-
-                if 0 < self.args.max_steps < global_step:
-                    train_iterator.close()
-                    break
+                # Only save final model (not intermediate epochs)
+                if (epoch + 1) == int(self.args.num_train_epochs):
+                    self.save_model(fold=fold if self.args.k_folds > 1 else None, epoch="final")
 
             # End of training for this fold
-
-            # Verify metrics are collected for this fold
-            logger.info(f"Final epoch_metrics for fold {fold + 1}: {self.epoch_metrics}")
-            logger.info(f"  Accuracy values: {self.epoch_metrics['accuracy']}")
-            logger.info(f"  F1 values: {self.epoch_metrics['f1_score']}")
-
-            # Direct file saving without depending on visualization
-            epoch_metrics_file = os.path.join(self.results_dir,
-                                              f"fold_{fold}_direct_metrics.json" if self.args.k_folds > 1 else "direct_metrics.json")
-            try:
-                with open(epoch_metrics_file, 'w') as f:
-                    json.dump(self.epoch_metrics, f, indent=4)
-                logger.info(f"Directly saved metrics to {epoch_metrics_file}")
-            except Exception as e:
-                logger.error(f"Failed to save direct metrics: {e}")
-
-            # Also save metrics directly
             self.save_metrics_directly(fold=fold if self.args.k_folds > 1 else None)
 
-            # 训练结束后，在绘制指标前，先明确保存一个单独的损失CSV文件
-            loss_data_df = pd.DataFrame({
-                'epoch': range(1, len(train_losses) + 1),
-                'training_loss': train_losses,
-                'validation_loss': val_losses if len(val_losses) == len(train_losses) else train_losses
-            })
-            loss_csv_path = os.path.join(self.results_dir,
-                                         f"fold_{fold}_loss_data.csv" if self.args.k_folds > 1 else "loss_data.csv")
-            loss_data_df.to_csv(loss_csv_path, index=False)
-            logger.info(f"Saved loss data to {loss_csv_path}")
-
-            # Check model parameters after training
-            param_norm_after = sum(p.norm().item() for p in self.model.parameters())
-            logger.info(f"Model parameter norm after training: {param_norm_after:.4f}")
-            if abs(param_norm_after - param_norm_before) < 1e-4:
-                logger.warning("⚠️ Model parameters barely changed! Training may not be effective.")
-
-            # 在调用plot_training_curves前，添加日志确认绘制损失曲线
-            logger.info(
-                f"Plotting loss curves for {'fold ' + str(fold + 1) if self.args.k_folds > 1 else 'training'}...")
-            logger.info(f"Training losses: {train_losses}")
-            logger.info(f"Validation losses: {val_losses}")
-
-            # Plot loss curves
             if VISUALIZATION_AVAILABLE:
                 try:
-                    # 保存标准的训练曲线
-                    plot_training_curves(
-                        train_losses,
-                        val_losses,
-                        save_dir=self.plots_dir,
-                        fold=fold if self.args.k_folds > 1 else None
-                    )
-
-                    # 同时保存损失和指标在同一个图表中
                     self.plot_loss_and_metrics(
                         train_losses,
                         val_losses,
                         fold=fold if self.args.k_folds > 1 else None
                     )
-
-                    # 为了清晰记录损失值，打印关键信息
-                    logger.info(
-                        f"Training losses summary - Min: {min(train_losses):.4f}, Max: {max(train_losses):.4f}, Last: {train_losses[-1]:.4f}")
-                    if val_losses and len(val_losses) > 0:
-                        valid_val_losses = [v for v in val_losses if v < 5]  # 过滤掉异常高的值
-                        if valid_val_losses:
-                            logger.info(
-                                f"Validation losses summary - Min: {min(valid_val_losses):.4f}, Max: {max(valid_val_losses):.4f}, Last: {valid_val_losses[-1]:.4f}")
-                        else:
-                            logger.warning("No valid validation losses (all values too high)")
                 except Exception as e:
                     logger.warning(f"Failed to plot curves: {e}")
-                    # 失败时仍然尝试保存损失数据
-                    try:
-                        loss_data_df = pd.DataFrame({
-                            'epoch': range(1, len(train_losses) + 1),
-                            'training_loss': train_losses
-                        })
-                        if val_losses and len(val_losses) > 0:
-                            loss_data_df['validation_loss'] = val_losses if len(val_losses) == len(
-                                train_losses) else val_losses + [None] * (len(train_losses) - len(val_losses))
 
-                        loss_csv_path = os.path.join(self.results_dir,
-                                                     f"fold_{fold}_loss_data_emergency.csv" if self.args.k_folds > 1 else "loss_data_emergency.csv")
-                        loss_data_df.to_csv(loss_csv_path, index=False)
-                        logger.info(f"Saved emergency loss data to {loss_csv_path}")
-                    except Exception as e2:
-                        logger.error(f"Failed to save emergency loss data: {e2}")
-            else:
-                logger.warning("Skipping loss curve visualization due to missing libraries")
-
-            # Plot metrics curves directly here rather than using imported function
-            if VISUALIZATION_AVAILABLE:
-                try:
-                    # First try to use the imported function
-                    try:
-                        plot_metrics_curves(
-                            self.epoch_metrics,
-                            save_dir=self.plots_dir,
-                            fold=fold if self.args.k_folds > 1 else None
-                        )
-                        logger.info(f"Used imported plot_metrics_curves function")
-                    except Exception as e:
-                        logger.warning(f"Failed to use imported plot_metrics_curves: {e}")
-
-                        # Fall back to direct implementation
-                        # Create combined metrics visualization
-                        plt.figure(figsize=(12, 8))
-
-                        epochs = range(1, len(self.epoch_metrics['accuracy']) + 1)
-
-                        # Plot all metrics on the same graph with different colors and markers
-                        plt.plot(epochs, self.epoch_metrics['accuracy'], 'o-', color='#1f77b4', linewidth=2,
-                                 markersize=8,
-                                 label='Accuracy')
-                        plt.plot(epochs, self.epoch_metrics['precision'], 's-', color='#2ca02c', linewidth=2,
-                                 markersize=8,
-                                 label='Precision')
-                        plt.plot(epochs, self.epoch_metrics['recall'], '^-', color='#d62728', linewidth=2, markersize=8,
-                                 label='Recall')
-                        plt.plot(epochs, self.epoch_metrics['f1_score'], 'D-', color='#ff7f0e', linewidth=2,
-                                 markersize=8,
-                                 label='F1 Score')
-
-                        # Add title and labels with enhanced styling
-                        plt.title('Training Metrics per Epoch', fontsize=16)
-                        plt.xlabel('Epochs', fontsize=14)
-                        plt.ylabel('Score', fontsize=14)
-
-                        # Set axis limits and grid for better visualization
-                        plt.ylim([0, 1.05])  # Metrics range from 0 to 1
-                        plt.xlim([0.8, len(epochs) + 0.2])  # Add some padding on x-axis
-                        plt.grid(True, linestyle='--', alpha=0.7)
-
-                        # Add minor grid lines for better readability
-                        plt.minorticks_on()
-                        plt.grid(which='minor', linestyle=':', alpha=0.4)
-
-                        # Set x-ticks to integers (epoch numbers)
-                        plt.xticks(epochs)
-
-                        # Create enhanced legend
-                        plt.legend(loc='lower right', fontsize=12, framealpha=0.9)
-
-                        # Save the plot
-                        if fold is not None:
-                            filename = os.path.join(self.plots_dir, f'combined_metrics_fold_{fold}.png')
-                        else:
-                            filename = os.path.join(self.plots_dir, 'combined_metrics.png')
-
-                        plt.savefig(filename, bbox_inches='tight', dpi=150)
-                        plt.close()
-                        logger.info(f"Combined metrics plot saved to {filename}")
-                except Exception as e:
-                    logger.warning(f"Failed to plot metrics curves: {e}")
-            else:
-                logger.warning("Skipping metrics curve visualization due to missing libraries")
-
-            # Final evaluation on validation set
+            # Final evaluation
             if dev_dataset:
                 logger.info(f"{'=' * 50}")
                 logger.info(f"Final Evaluation on Validation Set (Fold {fold + 1})")
@@ -1664,127 +1540,23 @@ class Trainer(object):
                                 f"Rec={eval_results['recall']:.4f}, " +
                                 f"F1={eval_results['f1_score']:.4f}")
 
-                    # Before storing results in cv_results
-                    if eval_results['accuracy'] < 0.5:  # If accuracy is suspiciously low
-                        logger.warning(
-                            f"🚨 Suspiciously low accuracy detected in fold {fold + 1}: {eval_results['accuracy']:.4f}")
-                        logger.warning("This might indicate a problem with the validation data or model training.")
-
-                        # Use the test set performance as a fallback for visualization
-                        # This is just to make the visualizations meaningful
-                        if self.test_dataset:
-                            logger.info("Performing emergency evaluation on test set for visualization...")
-                            test_eval = self.evaluate("test", prefix=f"fold_{fold}_emergency", save_cm=False)
-                            logger.info(f"Emergency evaluation on test set: Acc={test_eval['accuracy']:.4f}")
-
-                            # Store the test metrics instead (this is just for visualization)
-                            for metric in ['accuracy', 'precision', 'recall', 'f1_score']:
-                                self.cv_results[metric].append(float(test_eval[metric]))
-
-                            # Log this emergency action
-                            logger.warning(
-                                "Using test set performance for visualization since fold metrics were too low")
+                    # Store metrics in cv_results
+                    for metric in ['accuracy', 'precision', 'recall', 'f1_score']:
+                        if metric in eval_results and eval_results[metric] is not None:
+                            self.cv_results[metric].append(float(eval_results[metric]))
                         else:
-                            # If no test set, use hardcoded reasonable values
-                            logger.warning("No test set available, using reasonable default values for visualization")
-                            self.cv_results['accuracy'].append(0.80)
-                            self.cv_results['precision'].append(0.78)
-                            self.cv_results['recall'].append(0.77)
-                            self.cv_results['f1_score'].append(0.77)
-                    else:
-                        # Normal case - store the actual validation metrics
-                        for metric in ['accuracy', 'precision', 'recall', 'f1_score']:
-                            if metric in eval_results and eval_results[metric] is not None:
-                                self.cv_results[metric].append(float(eval_results[metric]))
-                                logger.info(f"  Added final {metric}={eval_results[metric]:.4f} to cv_results")
-                            else:
-                                logger.warning(
-                                    f"Metric '{metric}' not found in final evaluation results for fold {fold + 1}")
-                                # Use a reasonable default value
-                                self.cv_results[metric].append(0.75)
+                            logger.warning(
+                                f"Metric '{metric}' not found in final evaluation results for fold {fold + 1}")
+                            self.cv_results[metric].append(0.75)
 
                 all_fold_results.append(eval_results)
 
-            # End of fold
-
         # End of all folds
 
-        # 在交叉验证后画所有fold的损失曲线
+        # Plot fold loss curves for cross-validation
         if self.args.k_folds > 1:
             logger.info("Plotting loss curves for all folds...")
             self.plot_all_fold_curves()
-
-            # 保存所有fold的损失数据到JSON，以备将来使用
-            try:
-                loss_data_file = os.path.join(self.results_dir, 'all_folds_loss_data.json')
-                with open(loss_data_file, 'w') as f:
-                    json.dump(self.all_fold_losses, f, indent=4)
-                logger.info(f"All folds loss data saved to {loss_data_file}")
-            except Exception as e:
-                logger.warning(f"Failed to save loss data to JSON: {e}")
-
-        # Save standard training metrics if not in cross-validation mode
-        if not self.args.k_folds > 1:
-            # Save metrics for standard training
-            if len(self.epoch_metrics['accuracy']) > 0:
-                # 修改metrics_file的保存路径，确保包含loss信息
-                metrics_file = os.path.join(self.results_dir,
-                                            f"fold_{fold}_metrics_with_loss.csv" if self.args.k_folds > 1 else "training_metrics_with_loss.csv")
-                metrics_df = pd.DataFrame({
-                    'epoch': range(1, len(self.epoch_metrics['accuracy']) + 1),
-                    'training_loss': train_losses[:len(self.epoch_metrics['accuracy'])],
-                    'validation_loss': val_losses[:len(self.epoch_metrics['accuracy'])] if len(val_losses) >= len(
-                        self.epoch_metrics['accuracy']) else train_losses[:len(self.epoch_metrics['accuracy'])],
-                    'accuracy': self.epoch_metrics['accuracy'],
-                    'precision': self.epoch_metrics['precision'],
-                    'recall': self.epoch_metrics['recall'],
-                    'f1_score': self.epoch_metrics['f1_score']
-                })
-                metrics_df.to_csv(metrics_file, index=False)
-                logger.info(f"Standard training metrics saved to {metrics_file}")
-
-                # Create additional visualization for standard training
-                if VISUALIZATION_AVAILABLE:
-                    try:
-                        # Save a combined metrics plot for standard training
-                        plt.figure(figsize=(12, 8))
-
-                        # Plot all metrics on the same graph with different colors and markers
-                        plt.plot(metrics_df['epoch'], metrics_df['accuracy'], 'o-', color='#1f77b4', linewidth=2,
-                                 markersize=8, label='Accuracy')
-                        plt.plot(metrics_df['epoch'], metrics_df['precision'], 's-', color='#2ca02c', linewidth=2,
-                                 markersize=8, label='Precision')
-                        plt.plot(metrics_df['epoch'], metrics_df['recall'], '^-', color='#d62728', linewidth=2,
-                                 markersize=8, label='Recall')
-                        plt.plot(metrics_df['epoch'], metrics_df['f1_score'], 'D-', color='#ff7f0e', linewidth=2,
-                                 markersize=8, label='F1 Score')
-
-                        # Add title and labels with enhanced styling
-                        plt.title('Training Metrics Summary', fontsize=16)
-                        plt.xlabel('Epoch', fontsize=14)
-                        plt.ylabel('Score', fontsize=14)
-
-                        # Set axis limits and grid for better visualization
-                        plt.ylim([0, 1.05])  # Metrics range from 0 to 1
-                        plt.xlim([0.8, len(metrics_df['epoch']) + 0.2])  # Add some padding on x-axis
-                        plt.grid(True, linestyle='--', alpha=0.7)
-
-                        # Add minor grid lines for better readability
-                        plt.minorticks_on()
-                        plt.grid(which='minor', linestyle=':', alpha=0.4)
-
-                        # Set x-ticks to integers (epoch numbers)
-                        plt.xticks(metrics_df['epoch'])
-
-                        # Create enhanced legend
-                        plt.legend(loc='lower right', fontsize=12, framealpha=0.9)
-
-                        # Save the plot with high quality
-                        plt.savefig(os.path.join(self.plots_dir, 'combined_metrics.png'), bbox_inches='tight', dpi=150)
-                        plt.close()
-                        logger.info(f"Combined metrics plot saved")
-                    except Exception as e:
-                        logger.warning(f"Failed to create combined metrics plot: {e}")
 
         # Cross-validation summary (if applicable)
         if self.args.k_folds > 1:
@@ -1792,11 +1564,6 @@ class Trainer(object):
             logger.info(f"{'=' * 50}")
             logger.info(f"Cross-Validation Summary")
             logger.info(f"{'=' * 50}")
-
-            # Debug: log raw cross-validation results
-            logger.info("Cross-validation results summary:")
-            for metric, values in self.cv_results.items():
-                logger.info(f"  {metric}: {values}")
 
             # Calculate average metrics across all folds
             avg_results = {metric: np.mean(values) for metric, values in self.cv_results.items()}
@@ -1816,65 +1583,17 @@ class Trainer(object):
             cv_df.to_csv(cv_file)
             logger.info(f"Cross-validation results saved to {cv_file}")
 
-            # Try using the imported function first
-            if VISUALIZATION_AVAILABLE and len(self.cv_results['accuracy']) > 0:
+            # Visualize cross-validation results
+            if VISUALIZATION_AVAILABLE:
                 try:
                     plot_cross_validation_results(self.cv_results, save_dir=self.plots_dir)
-                    logger.info("Used imported plot_cross_validation_results function")
                 except Exception as e:
-                    logger.warning(f"Failed to use imported plot_cross_validation_results: {e}")
-                    # Fall back to direct plotting
-                    # Create figure for combined metrics
-                    plt.figure(figsize=(14, 10))
-
-                    # Color palette for metrics
-                    colors = ['#1f77b4', '#2ca02c', '#d62728', '#ff7f0e']
-                    markers = ['o', 's', '^', 'D']
-
-                    metrics = ['accuracy', 'precision', 'recall', 'f1_score']
-                    folds = range(1, len(self.cv_results[metrics[0]]) + 1)
-
-                    # Calculate average values
-                    avg_values = {}
-                    for i, metric in enumerate(metrics):
-                        avg = np.mean(self.cv_results[metric])
-                        std = np.std(self.cv_results[metric])
-                        avg_values[metric] = (avg, std)
-
-                    # Plot each metric with distinct styling and average values in legend
-                    for i, metric in enumerate(metrics):
-                        plt.plot(folds, self.cv_results[metric],
-                                 marker=markers[i % len(markers)],
-                                 color=colors[i % len(colors)],
-                                 linewidth=2.5,
-                                 markersize=10,
-                                 label=f"{metric.capitalize()}: {avg_values[metric][0]:.4f} ± {avg_values[metric][1]:.4f}")
-
-                        # Add horizontal line at average value
-                        plt.axhline(y=avg_values[metric][0],
-                                    linestyle='--',
-                                    alpha=0.6,
-                                    color=colors[i % len(colors)],
-                                    linewidth=1.5)
-
-                    # Enhanced styling
-                    plt.title('Cross-Validation Results Across Folds', fontsize=16)
-                    plt.xlabel('Fold', fontsize=14)
-                    plt.ylabel('Score', fontsize=14)
-                    plt.xticks(folds, fontsize=12)
-                    plt.ylim([0, 1.05])  # Metrics are usually between 0 and 1
-                    plt.grid(True, linestyle='--', alpha=0.7)
-                    plt.legend(loc='lower right', fontsize=11, framealpha=0.9)
-
-                    # Save the combined plot
-                    filename = os.path.join(self.plots_dir, 'cross_validation_combined_results.png')
-                    plt.savefig(filename, bbox_inches='tight', dpi=150)
-                    plt.close()
-                    logger.info(f"Cross-validation combined results saved to {filename}")
+                    logger.warning(f"Failed to create cross-validation plots: {e}")
 
     def train_with_filtered_data(self, filtered_fold_datasets):
         """
         Train the model with pre-filtered datasets for each fold.
+        Only saves the best model for each fold based on F1 score.
 
         Args:
             filtered_fold_datasets (dict): Dictionary mapping fold indices to filtered datasets
@@ -1897,6 +1616,11 @@ class Trainer(object):
             "recall": [],
             "f1_score": []
         }
+
+        # Track best F1 scores for each fold
+        best_f1_scores = {}
+        for fold in filtered_fold_datasets.keys():
+            best_f1_scores[fold] = 0.0
 
         # Train on each fold
         for fold, filtered_dataset in filtered_fold_datasets.items():
@@ -2051,11 +1775,17 @@ class Trainer(object):
                     prefix=f"filtered_fold_{fold}_"
                 )
 
-                # Save model checkpoint for the last epoch or periodically
-                if (epoch + 1) == int(self.args.num_train_epochs) or \
-                        (hasattr(self.args, 'save_epochs') and self.args.save_epochs > 0 and (
-                                epoch + 1) % self.args.save_epochs == 0):
-                    self.save_model(fold=fold, epoch=epoch + 1)
+                # Check if this is the best F1-score for this fold
+                current_f1 = eval_results.get('f1_score', 0.0)
+                if current_f1 > best_f1_scores[fold]:
+                    logger.info(f"New best F1-score: {current_f1:.4f} (previous: {best_f1_scores[fold]:.4f})")
+                    best_f1_scores[fold] = current_f1
+                    # Save as the best model for this fold
+                    self.save_model(fold=fold, is_best=True)
+
+                # Only save final model (not intermediate epochs)
+                if (epoch + 1) == int(self.args.num_train_epochs):
+                    self.save_model(fold=fold, epoch="final")
 
             # End of training for this fold
 
@@ -2065,34 +1795,14 @@ class Trainer(object):
             # Plot training curves
             if VISUALIZATION_AVAILABLE:
                 try:
-                    # Save standard training curves
-                    plot_training_curves(
-                        train_losses,
-                        val_losses,
-                        save_dir=self.plots_dir,
-                        fold=fold
-                    )
-
                     # Save combined loss and metrics plot
                     self.plot_loss_and_metrics(
                         train_losses,
                         val_losses,
                         fold=fold
                     )
-
-                    # Try to use the metrics plotting function
-                    try:
-                        plot_metrics_curves(
-                            self.epoch_metrics,
-                            save_dir=self.plots_dir,
-                            fold=fold
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to use imported plot_metrics_curves: {e}")
                 except Exception as e:
                     logger.warning(f"Failed to plot curves: {e}")
-            else:
-                logger.warning("Skipping curve visualization due to missing libraries")
 
             # Final evaluation on test set
             logger.info(f"{'=' * 50}")

@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # Define additional special tokens for entity markers
 ADDITIONAL_SPECIAL_TOKENS = ["<e1>", "</e1>", "<e2>", "</e2>"]
 
+
 def get_label(args):
     """Loads relation labels from the label file."""
     label_path = Path(args.data_dir) / args.label_file
@@ -166,6 +167,7 @@ def compute_metrics(preds, labels):
                     f"Recall: {result['recall']:.4f}, F1: {result['f1_score']:.4f}")
 
     return result
+
 
 def simple_accuracy(preds, labels):
     """Computes the accuracy of predictions."""
@@ -417,3 +419,63 @@ def save_epoch_metrics(metrics, epoch, save_dir, prefix=""):
     backup_df.to_csv(backup_path, index=False)
 
     logger.info(f"Epoch {epoch} metrics saved to {file_path} and {backup_path}")
+
+
+def cleanup_models(model_dir, keep_best=True, keep_final=True):
+    """
+    Cleans up model directories, removing intermediate epochs while keeping best/final models.
+
+    Args:
+        model_dir (str): Path to the model directory
+        keep_best (bool): Whether to keep the 'best' model
+        keep_final (bool): Whether to keep the 'final' model
+
+    Returns:
+        int: Number of directories removed
+    """
+    if not os.path.exists(model_dir):
+        logger.warning(f"Model directory not found: {model_dir}")
+        return 0
+
+    removed_count = 0
+    try:
+        # Get all potential fold directories
+        fold_dirs = [d for d in os.listdir(model_dir) if
+                     d.startswith("fold_") and os.path.isdir(os.path.join(model_dir, d))]
+        dirs_to_check = [model_dir]  # Start with the main model directory
+
+        # Add all fold directories
+        for fold_dir in fold_dirs:
+            dirs_to_check.append(os.path.join(model_dir, fold_dir))
+
+        # Process each directory
+        for dir_path in dirs_to_check:
+            logger.info(f"Checking directory: {dir_path}")
+
+            # Get all epoch directories
+            epoch_dirs = [d for d in os.listdir(dir_path) if (d.startswith("epoch_") and
+                                                              os.path.isdir(os.path.join(dir_path, d)) and
+                                                              not (keep_final and d == "epoch_final"))]
+
+            # Remove epoch directories
+            for epoch_dir in epoch_dirs:
+                epoch_path = os.path.join(dir_path, epoch_dir)
+                try:
+                    # Skip if this is a best model directory
+                    if epoch_dir.endswith("_best") and keep_best:
+                        logger.info(f"Keeping best model: {epoch_path}")
+                        continue
+
+                    import shutil
+                    shutil.rmtree(epoch_path)
+                    logger.info(f"Removed: {epoch_path}")
+                    removed_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to remove {epoch_path}: {e}")
+
+        logger.info(f"Cleanup completed. Removed {removed_count} directories.")
+        return removed_count
+
+    except Exception as e:
+        logger.error(f"Error during model cleanup: {e}")
+        return removed_count
