@@ -249,6 +249,9 @@ The duo-classifier architecture addresses class imbalance and complex classifica
 # Evaluation Only (Single-Classifier)
 .\run_model.bat eval
 
+# Evaluation Only (CV Single-Classifier)
+.\run_model.bat cv-eval
+
 # Standard Training with Duo-Classifier
 .\run_model.bat duo
 
