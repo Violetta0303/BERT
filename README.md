@@ -23,93 +23,6 @@ This implementation supports two model architectures:
     <img width="600" src="https://raw.githubusercontent.com/dthung1602/bert-relation-extraction/notebook/images/high_level_bin.png" />  
 </p>
 
-The duo-classifier architecture implements a two-stage classification approach:
-1. **First stage**: A binary classifier determines if a relation exists between the entities (No-Relation vs Has-Relation)
-2. **Second stage**: If a relation is detected, a multi-class classifier determines the specific relation type
-
-This approach can improve performance by:
-- Addressing class imbalance issues (the "Other" class typically dominates)
-- Focusing specialized classifiers on distinct parts of the problem
-- Reducing false positives by first filtering out non-relation instances
-
-## Methods
-
-### Original R-BERT Method:
-
-1. **Extract three vectors from BERT**
-   - [CLS] token vector for sentence-level representation
-   - Averaged entity_1 vector (including entity markers)
-   - Averaged entity_2 vector (including entity markers)
-   
-2. **Process each vector through fully-connected layers**
-   - Each vector goes through: dropout -> tanh -> fc-layer
-   
-3. **Concatenate the three vectors**
-   - Combine the processed vectors into a single representation
-   
-4. **Classification through a final fully-connected layer**
-   - dropout -> fc-layer -> softmax
-
-### Duo-Classifier Method:
-
-1. **Binary Classification Stage**
-   - Uses the same R-BERT architecture but with only two output classes
-   - Determines if any relation exists between entities
-   - Training on binary labels (0: No-Relation, 1: Has-Relation)
-
-2. **Relation Classification Stage**
-   - Only processes instances that passed the binary classifier
-   - Uses the standard R-BERT model to classify specific relation types
-   - Focuses on distinguishing between different relation classes
-
-## Implementation Details
-
-- Entity positions are marked with special tokens: `<e1>`, `</e1>`, `<e2>`, `</e2>`
-- During tokenization, these special tokens are replaced with `$` and `#` markers
-- The implementation maintains the same architecture as described in the original paper:
-  - Averaging entity token representations
-  - Using dropout and tanh activation before fully-connected layers
-  - Optional [SEP] token configuration (enabled with `--add_sep_token`)
-- The model includes comprehensive visualization tools for training metrics and evaluation results
-- Support for both standard training and k-fold cross-validation
-- The duo-classifier implementation includes threshold tuning for the binary classifier
-
-## Dependencies
-
-- Python >= 3.6
-- PyTorch >= 1.6.0
-- Transformers >= 3.3.1
-- NumPy
-- Pandas
-- Scikit-learn
-- Matplotlib
-- Seaborn (for visualization)
-
-## Dataset
-
-The model is designed to work with the SemEval 2010 Task 8 dataset, which contains sentences with marked entity pairs and their relation types.
-
-The dataset includes 9 directional relation types and 1 "Other" relation:
-- Cause-Effect
-- Component-Whole
-- Content-Container
-- Entity-Destination
-- Entity-Origin
-- Instrument-Agency
-- Member-Collection
-- Message-Topic
-- Product-Producer
-- Other
-
-Dataset Format:
-- TSV files with sentences containing entity markers
-- Example: "The <e1>system</e1> produces a <e2>signal</e2>"
-- Relations are represented as integers (0-9)
-
-For the duo-classifier approach, an additional binary dataset is automatically created with:
-- 0: No relation (corresponding to "Other" in the original dataset)
-- 1: Has relation (corresponding to any specific relation in the original dataset)
-
 ## Project Structure
 
 ```
@@ -145,56 +58,233 @@ For the duo-classifier approach, an additional binary dataset is automatically c
 └── run_model.bat          # Batch script for running the model
 ```
 
+## Model Implementations
+
+### Original R-BERT Method
+
+1. **Extract three vectors from BERT**
+   - [CLS] token vector for sentence-level representation
+   - Averaged entity_1 vector (including entity markers)
+   - Averaged entity_2 vector (including entity markers)
+   
+2. **Process each vector through fully-connected layers**
+   - Each vector goes through: dropout -> tanh -> fc-layer
+   
+3. **Concatenate the three vectors**
+   - Combine the processed vectors into a single representation
+   
+4. **Classification through a final fully-connected layer**
+   - dropout -> fc-layer -> softmax
+
+### Duo-Classifier Method
+
+1. **Binary Classification Stage**
+   - Uses the same R-BERT architecture but with only two output classes
+   - Determines if any relation exists between entities
+   - Training on binary labels (0: No-Relation, 1: Has-Relation)
+
+2. **Relation Classification Stage**
+   - Only processes instances that passed the binary classifier
+   - Uses the standard R-BERT model to classify specific relation types
+   - Focuses on distinguishing between different relation classes
+
+## Duo-Classifier (Two-Stage) Architecture
+
+### Design Philosophy
+
+The duo-classifier architecture addresses class imbalance and complex classification challenges in relation extraction:
+
+1. **Binary Classification Stage (Relation Existence)**
+   - Objective: Quickly determine if a relation exists between entities
+   - Output: 0 (No Relation) or 1 (Relation Exists)
+   - Input: Original sentence with entity markers
+   - Use case: Filter out irrelevant or noise-heavy samples
+
+2. **Multi-class Relation Classification Stage**
+   - Processes only samples identified as having a relation
+   - Precisely identifies specific relation types
+   - Focuses computational resources on meaningful relationship candidates
+
+### Key Advantages
+
+- **Reduce False Positives**: Two-stage filtering minimizes irrelevant sample misclassification
+- **Address Class Imbalance**: Separate relation existence and type identification
+- **Improve Classification Accuracy**: Train specialized classifiers for each stage
+- **Computational Efficiency**: Reduce processing for non-relational samples
+- **Flexible Thresholding**: Adjust binary classifier threshold for precision/recall trade-off
+
+### Implementation Strategies
+
+- **Binary Classifier**
+  - Lightweight model optimized for quick relation existence detection
+  - Trained to maximize early filtering efficiency
+  - Uses similar R-BERT architecture with reduced complexity
+
+- **Relation Classifier**
+  - Full-capacity model for precise relation type identification
+  - Only processes samples pre-filtered by binary classifier
+  - Maintains high-resolution feature extraction
+
+- - ## Visualization Capabilities
+  
+    The project provides comprehensive and detailed visualization tools to help understand model performance and training dynamics:
+  
+    ### 1. Training Loss Visualization
+  
+    #### Detailed Loss Curves
+  
+    - Plots training and validation loss across epochs
+    - Features:
+      - Color-coded curves for training and validation losses
+      - Minimum loss point annotations
+      - Handles abnormal loss values by filtering
+    - Supports both single training and cross-validation modes
+    - Generates high-quality PNG plots
+    - Saves accompanying CSV data for further analysis
+  
+    #### Key Visualization Features
+  
+    - Dynamic y-axis scaling
+    - Grid and minor grid lines for enhanced readability
+    - Epoch-based x-axis
+    - Informative annotations for minimum loss points
+  
+    ### 2. Performance Metrics Visualization
+  
+    #### Multi-Metric Tracking
+  
+    - Simultaneous visualization of key performance metrics:
+      - Accuracy
+      - Precision
+      - Recall
+      - F1 Score
+    - Features:
+      - Distinct colors and markers for each metric
+      - Comprehensive performance tracking across training epochs
+      - Supports both single training and cross-validation modes
+  
+    #### Visualization Characteristics
+  
+    - Score range from 0 to 1
+    - Detailed grid system
+    - Epoch-based x-axis
+    - Legend with metric details
+    - High-resolution PNG output
+    - Accompanying CSV data export
+  
+    ### 3. Confusion Matrix Visualization
+  
+    #### Comprehensive Confusion Matrix Analysis
+  
+    - Two visualization modes:
+      1. Raw Count Confusion Matrix
+      2. Normalized Confusion Matrix
+    - Features:
+      - Heatmap representation using Blues color palette
+      - Actual count and percentage annotations
+      - Supports full and abbreviated class names
+      - Handles multi-class classification scenarios
+  
+    #### Visualization Details
+  
+    - Improved readability with rotated labels
+    - Tight layout and high-resolution output
+    - Saves both visualization and raw data (CSV)
+    - Separate plots for raw and normalized matrices
+  
+    ### 4. Cross-Validation Results Visualization
+  
+    #### Comprehensive Performance Comparison
+  
+    - Visualizes performance across different cross-validation folds
+    - Plots all metrics with:
+      - Individual fold performance
+      - Average performance line
+      - Standard deviation indication
+  
+    #### Advanced Features
+  
+    - Calculates and displays:
+      - Mean performance
+      - Performance standard deviation
+    - Generates:
+      - Comprehensive PNG visualization
+      - Detailed CSV results
+      - Textual summary report
+  
+    ### Output and Storage
+  
+    #### Visualization Outputs
+  
+    - PNG plots saved in `model/results/plots/`
+    - CSV data files in `model/results/`
+    - Supports fold-specific and aggregate visualizations
+  
+    #### Visualization Types
+  
+    - Loss curves
+    - Metrics progression
+    - Confusion matrices
+    - Cross-validation performance
+    - Model-specific performance graphics
+  
+    ### Customization and Extensibility
+  
+    - Flexible handling of different dataset sizes
+    - Robust error handling
+    - Support for both single and cross-validation training modes
+    - Easy integration with existing training workflow
+
 ## How to Run
 
-### Using the batch script (recommended):
+### Using the Batch Script (Recommended)
 
 ```bash
-# Standard training (single-classifier)
+# Standard Training (Single-Classifier)
 .\run_model.bat
 
-# Cross-validation training (single-classifier)
+# Cross-validation Training (Single-Classifier)
 .\run_model.bat cv
 
-# Evaluation only (single-classifier)
+# Evaluation Only (Single-Classifier)
 .\run_model.bat eval
 
-# Standard training with duo-classifier
+# Standard Training with Duo-Classifier
 .\run_model.bat duo
 
-# Cross-validation training with duo-classifier
+# Cross-validation Training with Duo-Classifier
 .\run_model.bat duo-cv
 
-# Evaluation only (standard duo-classifier)
+# Evaluation Only (Standard Duo-Classifier)
 .\run_model.bat duo-eval
 
-# Evaluation only (CV duo-classifier)
+# Evaluation Only (CV Duo-Classifier)
 .\run_model.bat duo-cv-eval
 ```
 
-### Using Python directly:
+### Using Python Directly
 
-#### Standard Single-Classifier
+#### Standard Single-Classifier Scenarios
 ```bash
+# Standard Training
 python main.py --do_train --do_eval --model_dir ./model/standard
-```
 
-#### Cross-Validation Single-Classifier
-```bash
+# Cross-Validation Training
 python main.py --do_train --do_eval --k_folds 5 --model_dir ./model/cv
 ```
 
-#### Standard Duo-Classifier
+#### Duo-Classifier Scenarios
 ```bash
+# Standard Duo-Classifier Training
 python main.py --do_train --do_eval --duo_classifier --model_dir ./model/duo
-```
 
-#### Cross-Validation Duo-Classifier
-```bash
+# Cross-Validation Duo-Classifier Training
 python main.py --do_train --do_eval --duo_classifier --k_folds 5 --model_dir ./model/duo_cv
 ```
 
-### Key parameters:
+## Key Parameters
+
+### Training Parameters
 - `--model_name_or_path`: Pre-trained BERT model (default: bert-base-uncased)
 - `--data_dir`: Data directory (default: ./data)
 - `--train_file`: Training file (default: train.tsv)
@@ -202,134 +292,94 @@ python main.py --do_train --do_eval --duo_classifier --k_folds 5 --model_dir ./m
 - `--num_train_epochs`: Number of training epochs (default: 5)
 - `--train_batch_size`: Batch size for training (default: 16)
 - `--learning_rate`: Learning rate (default: 2e-5)
-- `--do_train`: Flag to run training
-- `--do_eval`: Flag to run evaluation
-- `--k_folds`: Number of folds for cross-validation (default: 1)
-- `--add_sep_token`: Whether to add [SEP] token at the end of sentences
-- `--duo_classifier`: Enable duo-classifier architecture
-- `--binary_threshold`: Threshold for binary classifier (default: 0.5)
-- `--binary_model_dir`: Path to binary classifier model (for evaluation)
+
+### Duo-Classifier Specific Parameters
+- `--duo_classifier`: Enable two-stage classification
+- `--binary_threshold`: Relation existence threshold (default: 0.5)
+  - Lower threshold: More inclusive, higher recall
+  - Higher threshold: More selective, higher precision
+
+### Execution Flags
+- `--do_train`: Run training process
+- `--do_eval`: Perform model evaluation
+- `--k_folds`: Cross-validation fold count (default: 1)
+
+## Cross-Validation Implementation
+
+### K-Fold Cross-Validation Strategy
+
+#### Core Approach
+- Splits entire dataset into K stratified folds
+- Ensures representative class distribution
+- Provides robust performance estimation
+
+#### Training Process
+1. **Fold Preparation**
+   - Randomly split data maintaining class proportions
+   - Create training and validation sets for each fold
+
+2. **Per-Fold Training**
+   - Train model K times
+   - Each iteration uses different train/validation split
+   - Reset model parameters between folds
+
+3. **Performance Aggregation**
+   - Compute metrics for each fold
+   - Calculate mean and standard deviation
+   - Assess model's generalization capability
+
+## Dataset
+
+### SemEval 2010 Task 8 Dataset
+
+Includes 9 directional relation types and 1 "Other" relation:
+- Cause-Effect
+- Component-Whole
+- Content-Container
+- Entity-Destination
+- Entity-Origin
+- Instrument-Agency
+- Member-Collection
+- Message-Topic
+- Product-Producer
+- Other
+
+### Dataset Format
+- TSV files with sentences containing entity markers
+- Example: "The <e1>system</e1> produces a <e2>signal</e2>"
+- Relations represented as integers (0-9)
+
+## Dependencies
+
+- Python >= 3.6
+- PyTorch >= 1.6.0
+- Transformers >= 3.3.1
+- NumPy
+- Pandas
+- Scikit-learn
+- Matplotlib
+- Seaborn (for visualization)
 
 ## Making Predictions
 
-### Standard Model:
+### Standard Model
 ```bash
-python predict.py --input_file {INPUT_FILE_PATH} --output_file {OUTPUT_FILE_PATH} --model_dir {SAVED_CKPT_PATH}
+python predict.py --input_file {INPUT_FILE} --output_file {OUTPUT_FILE} --model_dir {MODEL_PATH}
 ```
 
-### Duo-Classifier Model:
+### Duo-Classifier Model
 ```bash
-python predict.py --input_file {INPUT_FILE_PATH} --output_file {OUTPUT_FILE_PATH} --model_dir {RELATION_MODEL_PATH} --duo_classifier --binary_model_dir {BINARY_MODEL_PATH} --binary_threshold 0.5
+python predict.py \
+    --input_file {INPUT_FILE} \
+    --output_file {OUTPUT_FILE} \
+    --model_dir {RELATION_MODEL_PATH} \
+    --duo_classifier \
+    --binary_model_dir {BINARY_MODEL_PATH} \
+    --binary_threshold 0.5
 ```
-
-The input file should contain sentences with marked entities (e.g., "The <e1>system</e1> produces a <e2>signal</e2>").
-
-## Visualization
-
-The training process generates various visualization outputs in the `model/results/plots` directory:
-
-- Training and validation loss curves
-- Accuracy, precision, recall, and F1 score metrics per epoch
-- Confusion matrices (raw and normalized)
-- Cross-validation results (when using k-fold cross-validation)
-- For duo-classifier: binary and relation classification metrics
-
-These visualizations help track model performance and identify potential issues during training.
-
-### Example visualizations:
-
-1. **Training and Validation Loss**
-   - Tracks the model's convergence over epochs
-   - Helps identify overfitting when validation loss increases
-   
-2. **Metrics Curves**
-   - Shows the progression of accuracy, precision, recall, and F1 scores
-   - Useful for determining when to stop training
-
-3. **Confusion Matrix**
-   - Reveals which relations are most frequently confused
-   - Helps identify class imbalance issues
-
-4. **Cross-Validation Results**
-   - Compares performance across different data splits
-   - Indicates the model's stability and generalization ability
-   
-5. **Duo-Classifier Performance**
-   - Binary classifier metrics
-   - Relation classifier metrics
-   - Combined system performance
-
-## Evaluation
-
-The model is evaluated using the official SemEval 2010 Task 8 evaluation metrics:
-- Macro-averaged F1 score (excluding the "Other" relation)
-- Per-class precision, recall, and F1 scores
-- Confusion matrix analysis
-
-For duo-classifier, additional metrics are provided:
-- Binary classification performance (accuracy, precision, recall, F1)
-- Relation classification performance on instances predicted to have relations
-- Overall system performance
-
-Evaluation results are stored in:
-- `eval/proposed_answers.txt`: Model predictions
-- `eval/answer_keys.txt`: Gold standard answers
-- `model/results/{prefix}_detailed_report.xlsx`: Detailed analysis
-
-## Cross-Validation
-
-The model supports k-fold cross-validation for more robust performance evaluation:
-
-1. The training dataset is split into k folds
-2. For each fold:
-   - Train on k-1 folds
-   - Validate on the remaining fold
-3. Final performance is reported as the average across all folds
-
-This helps ensure that model performance is consistent and not dependent on a specific train/test split. The cross-validation implementation:
-
-- Creates stratified folds to maintain class distribution
-- Resets the model for each fold to ensure independence
-- Tracks metrics separately for each fold
-- Produces summary statistics (mean and standard deviation)
-- Visualizes performance across folds
-
-For duo-classifier with cross-validation, both the binary and relation classifiers are trained using the same fold splits to ensure consistency.
-
-## Results
-
-On the SemEval 2010 Task 8 test set:
-
-### Single-Classifier Architecture:
-- Macro-averaged F1 score: ~88% (comparable to published results)
-- Training time: ~10 minutes per epoch on a single GPU
-- Cross-validation provides more stable performance metrics
-
-### Duo-Classifier Architecture:
-- Binary classification accuracy: ~90-92%
-- Final relation classification F1 score: ~87-89%
-- Potential improvements on datasets with high class imbalance
-- Better handling of the "Other" relation class
-
-The duo-classifier approach can be particularly effective when:
-- The dataset has a large number of "Other" relations
-- You need to minimize false positives
-- You want to build a high-precision system
-
-## Known Issues and Solutions
-
-1. **Empty metrics plot**: This can occur when no validation dataset is available. The model now automatically creates simulated metrics based on training loss to ensure visualizations are always generated.
-
-2. **Cross-validation errors**: If encountering errors during cross-validation, ensure the dev_k_*.tsv files exist. The model will now automatically create these files if they don't exist.
-
-3. **BERT initialization warnings**: Warnings about weights not being initialized from the checkpoint are normal for custom layers added on top of BERT.
-
-4. **Binary threshold tuning**: The default binary threshold (0.5) may not be optimal. Consider tuning this parameter based on your specific requirements for precision vs. recall.
 
 ## References
 
-- [Enriching Pre-trained Language Model with Entity Information for Relation Classification](https://arxiv.org/abs/1905.08284)
+- [Original Paper](https://arxiv.org/abs/1905.08284)
 - [SemEval 2010 Task 8 Dataset](https://drive.google.com/file/d/0B_jQiLugGTAkMDQ5ZjZiMTUtMzQ1Yy00YWNmLWJlZDYtOWY1ZDMwY2U4YjFk/view)
-- [SemEval 2010 Task 8 Paper](https://www.aclweb.org/anthology/S10-1006.pdf)
 - [Huggingface Transformers](https://github.com/huggingface/transformers)
-- [NLP-progress Relation Extraction](http://nlpprogress.com/english/relationship_extraction.html)
