@@ -54,7 +54,6 @@ This implementation supports two model architectures:
 ├── trainer.py             # Training and evaluation logic
 ├── utils.py               # Utility functions
 ├── visualization.py       # Visualization utilities
-├── official_eval.py       # Official evaluation script
 └── run_model.bat          # Batch script for running the model
 ```
 
