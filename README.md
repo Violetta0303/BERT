@@ -383,6 +383,7 @@ python predict.py \
 ## References
 
 - [Complete Code Repository with Pre-trained Models](https://drive.google.com/file/d/1iIuql8PyPLbNR9FASQiXnPy6SkfMo5MC/view?usp=sharing)
+- [Original R-BERT Implementation](https://github.com/monologg/R-BERT/tree/master)
 - [Original Paper](https://arxiv.org/abs/1905.08284)
 - [SemEval 2010 Task 8 Dataset](https://drive.google.com/file/d/0B_jQiLugGTAkMDQ5ZjZiMTUtMzQ1Yy00YWNmLWJlZDYtOWY1ZDMwY2U4YjFk/view)
 - [Huggingface Transformers](https://github.com/huggingface/transformers)
