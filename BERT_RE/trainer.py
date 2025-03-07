@@ -2,7 +2,7 @@ import logging
 import os
 import json
 import copy
-
+import random
 import numpy as np
 import torch
 from sklearn.model_selection import KFold
@@ -725,17 +725,26 @@ class Trainer(object):
             # Check if using cross-validation
             is_cv = hasattr(self.args, 'k_folds') and self.args.k_folds > 1
 
+            # if is_cv:
+            #     # For CV, try fold-specific best model first
+            #     for fold_idx in range(self.args.k_folds):
+            #         best_dir = os.path.join(self.args.binary_model_dir, f"fold_{fold_idx}_best")
+            #         if os.path.exists(best_dir):
+            #             config_path = os.path.join(best_dir, "config.json")
+            #             if os.path.exists(config_path):
+            #                 logger.info(f"Found best binary model for fold {fold_idx}")
+            #                 binary_config_path = config_path
+            #                 binary_model_dir = best_dir
+            #                 break
+
             if is_cv:
-                # For CV, try fold-specific best model first
                 for fold_idx in range(self.args.k_folds):
                     best_dir = os.path.join(self.args.binary_model_dir, f"fold_{fold_idx}_best")
-                    if os.path.exists(best_dir):
-                        config_path = os.path.join(best_dir, "config.json")
-                        if os.path.exists(config_path):
-                            logger.info(f"Found best binary model for fold {fold_idx}")
-                            binary_config_path = config_path
-                            binary_model_dir = best_dir
-                            break
+                    if os.path.exists(best_dir) and os.path.exists(os.path.join(best_dir, "config.json")):
+                        binary_config_path = os.path.join(best_dir, "config.json")
+                        binary_model_dir = best_dir
+                        logger.info(f"Found best binary model for fold {fold_idx}")
+                        break
 
             # Try best model directory (non-fold-specific)
             if not binary_config_path:
@@ -1589,270 +1598,3 @@ class Trainer(object):
                     plot_cross_validation_results(self.cv_results, save_dir=self.plots_dir)
                 except Exception as e:
                     logger.warning(f"Failed to create cross-validation plots: {e}")
-
-    def train_with_filtered_data(self, filtered_fold_datasets):
-        """
-        Train the model with pre-filtered datasets for each fold.
-        Only saves the best model for each fold based on F1 score.
-
-        Args:
-            filtered_fold_datasets (dict): Dictionary mapping fold indices to filtered datasets
-        """
-        logger.info("Starting training with filtered datasets (duo-classifier)")
-
-        # Check if we have filtered datasets
-        if not filtered_fold_datasets:
-            logger.error("No filtered datasets provided for training")
-            return
-
-        # Log fold dataset sizes
-        for fold, dataset in filtered_fold_datasets.items():
-            logger.info(f"Fold {fold}: {len(dataset)} samples")
-
-        # Initialize cross-validation results
-        self.cv_results = {
-            "accuracy": [],
-            "precision": [],
-            "recall": [],
-            "f1_score": []
-        }
-
-        # Track best F1 scores for each fold
-        best_f1_scores = {}
-        for fold in filtered_fold_datasets.keys():
-            best_f1_scores[fold] = 0.0
-
-        # Train on each fold
-        for fold, filtered_dataset in filtered_fold_datasets.items():
-            logger.info(f"{'=' * 50}")
-            logger.info(f"Training on Filtered Data for Fold {fold + 1}/{len(filtered_fold_datasets)}")
-            logger.info(f"{'=' * 50}")
-
-            # Reset model for each fold
-            if fold > 0:
-                self.model = RBERT.from_pretrained(self.args.model_name_or_path, config=self.config, args=self.args)
-                self.model.to(self.device)
-
-            # Set up training dataloader with filtered dataset
-            train_sampler = RandomSampler(filtered_dataset)
-            train_dataloader = DataLoader(
-                filtered_dataset,
-                sampler=train_sampler,
-                batch_size=self.args.train_batch_size,
-            )
-
-            # Calculate total training steps
-            if self.args.max_steps > 0:
-                t_total = self.args.max_steps
-                self.args.num_train_epochs = (
-                        self.args.max_steps // (len(train_dataloader) // self.args.gradient_accumulation_steps) + 1
-                )
-            else:
-                t_total = len(train_dataloader) // self.args.gradient_accumulation_steps * self.args.num_train_epochs
-
-            # Configure optimizer and scheduler
-            no_decay = ["bias", "LayerNorm.weight"]
-            optimizer_grouped_parameters = [
-                {
-                    "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
-                    "weight_decay": self.args.weight_decay,
-                },
-                {
-                    "params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
-                    "weight_decay": 0.0,
-                },
-            ]
-            optimizer = AdamW(
-                optimizer_grouped_parameters,
-                lr=self.args.learning_rate,
-                eps=self.args.adam_epsilon,
-            )
-            scheduler = get_linear_schedule_with_warmup(
-                optimizer,
-                num_warmup_steps=self.args.warmup_steps,
-                num_training_steps=t_total,
-            )
-
-            # Log model parameter norm before training
-            param_norm_before = sum(p.norm().item() for p in self.model.parameters())
-            logger.info(f"Model parameter norm before training: {param_norm_before:.4f}")
-
-            # Training loop
-            logger.info("***** Running training on filtered data *****")
-            logger.info(f"  Number of filtered examples = {len(filtered_dataset)}")
-            logger.info(f"  Number of Epochs = {self.args.num_train_epochs}")
-            logger.info(f"  Total train batch size = {self.args.train_batch_size}")
-            logger.info(f"  Gradient Accumulation steps = {self.args.gradient_accumulation_steps}")
-            logger.info(f"  Total optimization steps = {t_total}")
-
-            global_step = 0
-            tr_loss = 0.0
-            self.model.zero_grad()
-
-            # Lists to store metrics for plotting
-            train_losses = []
-            val_losses = []
-
-            # Reset epoch_metrics for this fold
-            self.epoch_metrics = {
-                'accuracy': [],
-                'precision': [],
-                'recall': [],
-                'f1_score': []
-            }
-
-            train_iterator = trange(int(self.args.num_train_epochs), desc="Epoch")
-
-            for epoch in train_iterator:
-                epoch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}")
-                epoch_loss = 0.0
-                steps_in_epoch = 0
-
-                for step, batch in enumerate(epoch_iterator):
-                    self.model.train()
-                    batch = tuple(t.to(self.device) for t in batch)  # Move batch to GPU or CPU
-                    inputs = {
-                        "input_ids": batch[0],
-                        "attention_mask": batch[1],
-                        "token_type_ids": batch[2],
-                        "labels": batch[3],
-                        "e1_mask": batch[4],
-                        "e2_mask": batch[5],
-                    }
-                    outputs = self.model(**inputs)
-                    loss = outputs[0]
-
-                    if self.args.gradient_accumulation_steps > 1:
-                        loss = loss / self.args.gradient_accumulation_steps
-
-                    loss.backward()
-                    epoch_loss += loss.item()
-                    steps_in_epoch += 1
-
-                    tr_loss += loss.item()
-                    if (step + 1) % self.args.gradient_accumulation_steps == 0:
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
-
-                        optimizer.step()
-                        scheduler.step()  # Update learning rate schedule
-                        self.model.zero_grad()
-                        global_step += 1
-
-                # End of epoch
-                avg_train_loss = epoch_loss / steps_in_epoch
-                train_losses.append(avg_train_loss)
-
-                # Save training loss
-                self.last_train_loss = avg_train_loss
-                if fold not in self.all_fold_losses['train']:
-                    self.all_fold_losses['train'][fold] = []
-                self.all_fold_losses['train'][fold].append(avg_train_loss)
-
-                logger.info(f"Epoch {epoch + 1} - Avg. Training Loss: {avg_train_loss:.4f}")
-
-                # Evaluate after each epoch with the test set (since we don't have a dedicated val set for filtered data)
-                eval_results = self.evaluate("test", prefix=f"fold_{fold}_epoch_{epoch}")
-                val_losses.append(eval_results["loss"])
-
-                # Save validation loss
-                if fold not in self.all_fold_losses['val']:
-                    self.all_fold_losses['val'][fold] = []
-                self.all_fold_losses['val'][fold].append(eval_results["loss"])
-
-                # Store evaluation metrics
-                for metric in ['accuracy', 'precision', 'recall', 'f1_score']:
-                    if metric in eval_results:
-                        self.epoch_metrics[metric].append(eval_results[metric])
-                    else:
-                        logger.warning(f"Metric '{metric}' not found in evaluation results")
-                        self.epoch_metrics[metric].append(0.0)
-
-                # Save metrics for this epoch
-                save_epoch_metrics(
-                    eval_results,
-                    epoch + 1,
-                    self.results_dir,
-                    prefix=f"filtered_fold_{fold}_"
-                )
-
-                # Check if this is the best F1-score for this fold
-                current_f1 = eval_results.get('f1_score', 0.0)
-                if current_f1 > best_f1_scores[fold]:
-                    logger.info(f"New best F1-score: {current_f1:.4f} (previous: {best_f1_scores[fold]:.4f})")
-                    best_f1_scores[fold] = current_f1
-                    # Save as the best model for this fold
-                    self.save_model(fold=fold, is_best=True)
-
-                # Only save final model (not intermediate epochs)
-                if (epoch + 1) == int(self.args.num_train_epochs):
-                    self.save_model(fold=fold, epoch="final")
-
-            # End of training for this fold
-
-            # Save metrics directly
-            self.save_metrics_directly(fold=fold)
-
-            # Plot training curves
-            if VISUALIZATION_AVAILABLE:
-                try:
-                    # Save combined loss and metrics plot
-                    self.plot_loss_and_metrics(
-                        train_losses,
-                        val_losses,
-                        fold=fold
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to plot curves: {e}")
-
-            # Final evaluation on test set
-            logger.info(f"{'=' * 50}")
-            logger.info(f"Final Evaluation on Test Set (Fold {fold + 1})")
-            logger.info(f"{'=' * 50}")
-
-            eval_results = self.evaluate(
-                "test",
-                prefix=f"filtered_fold_{fold}_final",
-                save_cm=True,
-                fold=fold
-            )
-
-            # Store results for cross-validation summary
-            for metric in ['accuracy', 'precision', 'recall', 'f1_score']:
-                if metric in eval_results:
-                    self.cv_results[metric].append(float(eval_results[metric]))
-                else:
-                    logger.warning(f"Metric '{metric}' not found in final evaluation results for fold {fold + 1}")
-                    self.cv_results[metric].append(0.75)  # Use a reasonable default value
-
-        # End of all folds
-
-        # Cross-validation summary
-        logger.info(f"{'=' * 50}")
-        logger.info(f"Duo-Classifier Cross-Validation Summary")
-        logger.info(f"{'=' * 50}")
-
-        # Calculate average metrics across all folds
-        avg_results = {metric: np.mean(values) for metric, values in self.cv_results.items()}
-        std_results = {metric: np.std(values) for metric, values in self.cv_results.items()}
-
-        logger.info(f"CV Average Results:")
-        for metric, value in avg_results.items():
-            logger.info(f"  {metric}: {value:.4f} ± {std_results[metric]:.4f}")
-
-        # Save cross-validation results
-        cv_df = pd.DataFrame(self.cv_results)
-        cv_df.index = [f"Fold {i + 1}" for i in range(len(cv_df))]
-        cv_df.loc["Average"] = cv_df.mean()
-        cv_df.loc["Std Dev"] = cv_df.std()
-
-        cv_file = os.path.join(self.results_dir, "duo_cross_validation_results.csv")
-        cv_df.to_csv(cv_file)
-        logger.info(f"Duo-classifier cross-validation results saved to {cv_file}")
-
-        # Plot cross-validation results
-        if VISUALIZATION_AVAILABLE:
-            try:
-                plot_cross_validation_results(self.cv_results, save_dir=self.plots_dir, prefix="duo_")
-                logger.info("Cross-validation plots created")
-            except Exception as e:
-                logger.warning(f"Failed to create cross-validation plots: {e}")

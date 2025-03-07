@@ -64,7 +64,12 @@ def filter_dataset_with_binary_classifier(args, binary_model, dataset, device):
             outputs = binary_model(**inputs)
             logits = outputs[0]
             probs = torch.softmax(logits, dim=1)
-            predictions = (probs[:, 1] > args.binary_threshold).cpu().numpy()
+
+            # Store probabilities for potential threshold adjustment
+            positive_probs = probs[:, 1].cpu().numpy()
+
+            # Apply threshold
+            predictions = (positive_probs > args.binary_threshold).astype(bool)
 
             # Store predictions and original indices
             binary_preds.extend(predictions)
@@ -74,15 +79,43 @@ def filter_dataset_with_binary_classifier(args, binary_model, dataset, device):
     # Find indices of positive samples (predicted to have relations)
     positive_indices = [idx for idx, pred in zip(original_indices, binary_preds) if pred]
 
+    # Get original labels for all samples
+    all_original_labels = [dataset[idx][3].item() for idx in range(len(dataset))]
+    label_distribution_original = {}
+    for label in all_original_labels:
+        if label not in label_distribution_original:
+            label_distribution_original[label] = 0
+        label_distribution_original[label] += 1
+
     # Get labels of filtered samples for statistics
     filtered_labels = [dataset[idx][3].item() for idx in positive_indices]
-    binary_truth = [(label > 0) for label in filtered_labels]
+    label_distribution_filtered = {}
+    for label in filtered_labels:
+        if label not in label_distribution_filtered:
+            label_distribution_filtered[label] = 0
+        label_distribution_filtered[label] += 1
+
+    # Log detailed class distribution
+    logger.info(f"Original class distribution:")
+    for label, count in sorted(label_distribution_original.items()):
+        percentage = (count / len(dataset)) * 100
+        logger.info(f"  Class {label}: {count} samples ({percentage:.2f}%)")
+
+    logger.info(f"Filtered class distribution:")
+    for label, count in sorted(label_distribution_filtered.items()):
+        if label in label_distribution_original and label_distribution_original[label] > 0:
+            retention = (count / label_distribution_original[label]) * 100
+            logger.info(f"  Class {label}: {count} samples (retained {retention:.2f}% of original)")
+        else:
+            logger.info(f"  Class {label}: {count} samples")
+
+    binary_truth = [(label > 0) for label in all_original_labels]
 
     # Calculate statistics
     total_samples = len(dataset)
     positive_samples = len(positive_indices)
     negative_samples = total_samples - positive_samples
-    true_relations = sum(1 for label in [dataset[i][3].item() for i in range(len(dataset))] if label > 0)
+    true_relations = sum(1 for label in all_original_labels if label > 0)
 
     logger.info(f"Binary classifier statistics:")
     logger.info(
@@ -93,9 +126,59 @@ def filter_dataset_with_binary_classifier(args, binary_model, dataset, device):
     logger.info(
         f"  True negative (no relation): {total_samples - true_relations} ({(total_samples - true_relations) / total_samples * 100:.2f}%)")
 
+    # Check if we're losing too many samples
+    if positive_samples < 100:
+        logger.warning(f"⚠️ Very few samples ({positive_samples}) remain after filtering! Model training may fail.")
+
+        # If too few positive samples, lower the threshold and refilter
+        if positive_samples < 50 and args.binary_threshold > 0.3:
+            logger.warning(f"Automatically lowering binary threshold from {args.binary_threshold} to 0.3")
+            lowered_threshold = 0.3
+            new_positive_indices = [idx for idx, prob in zip(original_indices, positive_probs) if
+                                    prob > lowered_threshold]
+            if len(new_positive_indices) > positive_samples:
+                logger.info(f"After lowering threshold: {len(new_positive_indices)} samples (was {positive_samples})")
+                positive_indices = new_positive_indices
+                positive_samples = len(positive_indices)
+
+    # Check class diversity
+    unique_classes = set(filtered_labels)
+    if len(unique_classes) < 3:
+        logger.warning(f"⚠️ Only {len(unique_classes)} classes in filtered data! Multi-class training may fail.")
+
+        # If we lost too many classes, add some examples from missing classes
+        original_classes = set(all_original_labels)
+        missing_classes = original_classes - unique_classes
+        if missing_classes and positive_samples > 0:
+            logger.info(f"Adding samples from {len(missing_classes)} missing classes")
+
+            # Add at least 5 examples from each missing class
+            additional_indices = []
+            for class_id in missing_classes:
+                class_indices = [idx for idx in range(len(dataset))
+                                 if dataset[idx][3].item() == class_id]
+                if class_indices:
+                    # Take up to 5 examples or 10% of the class, whichever is greater
+                    samples_to_add = min(len(class_indices),
+                                         max(5, int(label_distribution_original.get(class_id, 0) * 0.1)))
+                    additional_indices.extend(class_indices[:samples_to_add])
+                    logger.info(f"  Added {samples_to_add} samples from class {class_id}")
+
+            if additional_indices:
+                # Add indices, avoiding duplicates
+                additional_indices = [idx for idx in additional_indices if idx not in positive_indices]
+                positive_indices.extend(additional_indices)
+                logger.info(f"After adding samples: {len(positive_indices)} total samples")
+
+                # Recalculate filtered labels
+                filtered_labels = [dataset[idx][3].item() for idx in positive_indices]
+                unique_classes = set(filtered_labels)
+                logger.info(f"Final class count: {len(unique_classes)} classes")
+
     # Create subset with only positive samples
-    filtered_dataset = Subset(dataset, positive_indices)
-    logger.info(f"Filtered dataset size: {len(filtered_dataset)}")
+    filtered_dataset = torch.utils.data.Subset(dataset, positive_indices)
+    logger.info(
+        f"Filtered dataset size: {len(filtered_dataset)} ({len(filtered_dataset) / len(dataset) * 100:.2f}% of original)")
 
     return filtered_dataset
 
@@ -224,89 +307,89 @@ def main(args):
                 if args.do_train:
                     binary_trainer.train()
 
-                # Load trained binary model for filtering
-                logger.info("Loading trained binary model to filter training data for relation classifier")
+                # Debug: Verify the label distribution in train_dataset
+                train_labels = [train_dataset[i][3].item() for i in range(min(1000, len(train_dataset)))]
+                unique_labels, counts = np.unique(train_labels, return_counts=True)
+                logger.info(f"Training dataset contains {len(unique_labels)} unique labels: {unique_labels}")
+                logger.info(f"Label distribution: {dict(zip(unique_labels, counts))}")
+
+                # Load the best binary model for filtering during inference
                 device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
 
-                # Filtered datasets for each fold
-                filtered_fold_datasets = {}
+                # Search for the most likely binary model directory based on the CV fold structure
+                binary_model_dir = None
 
-                # For each fold in the binary model, filter the corresponding training data
-                for fold in range(args.k_folds):
-                    # Set binary model dir to the specific fold
-                    # First look for the best fold model
-                    binary_fold_dir = os.path.join(binary_args.model_dir, f"fold_{fold}_best")
-                    if not os.path.exists(binary_fold_dir):
-                        # If best model not found, try final epoch
-                        binary_fold_dir = os.path.join(binary_args.model_dir, f"fold_{fold}/epoch_final")
-                        if not os.path.exists(binary_fold_dir):
-                            # Look for any epoch directory
-                            fold_dir = os.path.join(binary_args.model_dir, f"fold_{fold}")
-                            if not os.path.exists(fold_dir):
-                                logger.error(f"No binary model found for fold {fold}")
+                # First try fold_X_best directories
+                for fold_idx in range(args.k_folds):
+                    best_dir = os.path.join(binary_args.model_dir, f"fold_{fold_idx}_best")
+                    if os.path.exists(best_dir) and os.path.exists(os.path.join(best_dir, "config.json")):
+                        logger.info(f"Found binary model at best fold directory: {best_dir}")
+                        binary_model_dir = best_dir
+                        break
+
+                # If no best model found, try epoch_final in fold directories
+                if binary_model_dir is None:
+                    for fold_idx in range(args.k_folds):
+                        epoch_final_dir = os.path.join(binary_args.model_dir, f"fold_{fold_idx}", "epoch_final")
+                        if os.path.exists(epoch_final_dir) and os.path.exists(
+                                os.path.join(epoch_final_dir, "config.json")):
+                            logger.info(f"Found binary model at epoch_final directory: {epoch_final_dir}")
+                            binary_model_dir = epoch_final_dir
+                            break
+
+                # If still not found, try any available fold directory with epoch subdirectories
+                if binary_model_dir is None:
+                    for fold_idx in range(args.k_folds):
+                        fold_dir = os.path.join(binary_args.model_dir, f"fold_{fold_idx}")
+                        if os.path.exists(fold_dir):
+                            # Look for epoch_X subdirectories
+                            try:
+                                epoch_dirs = [d for d in os.listdir(fold_dir) if
+                                              d.startswith("epoch_") and os.path.isdir(os.path.join(fold_dir, d))]
+                                if epoch_dirs:
+                                    # Use the first found epoch directory
+                                    epoch_dir = os.path.join(fold_dir, epoch_dirs[0])
+                                    if os.path.exists(os.path.join(epoch_dir, "config.json")):
+                                        logger.info(f"Found binary model at: {epoch_dir}")
+                                        binary_model_dir = epoch_dir
+                                        break
+                            except Exception as e:
+                                logger.warning(f"Error checking fold directory {fold_dir}: {e}")
                                 continue
 
-                            epoch_dirs = [d for d in os.listdir(fold_dir) if d.startswith("epoch_")]
-                            if not epoch_dirs:
-                                logger.error(f"No epoch directories found in {fold_dir}")
-                                continue
+                if binary_model_dir is None:
+                    logger.error("Could not find any usable binary model directory")
+                    return
 
-                            # Sort to find latest epoch
-                            epoch_nums = [int(d.split("_")[1]) for d in epoch_dirs if d.split("_")[1].isdigit()]
-                            if not epoch_nums:
-                                logger.error(f"No valid epoch directories found in {fold_dir}")
-                                continue
+                # Now use the found model directory
+                try:
+                    logger.info(f"Loading binary model from: {binary_model_dir}")
+                    binary_config = BertConfig.from_pretrained(binary_model_dir, num_labels=2)
+                    binary_model = RBERT.from_pretrained(binary_model_dir, config=binary_config, args=binary_args)
+                    binary_model.to(device)
+                except Exception as e:
+                    logger.error(f"Error loading binary model: {e}")
+                    return
 
-                            latest_epoch = max(epoch_nums)
-                            binary_fold_dir = os.path.join(fold_dir, f"epoch_{latest_epoch}")
-
-                    # Verify model directory exists
-                    if not os.path.exists(binary_fold_dir):
-                        logger.error(f"Binary model directory not found: {binary_fold_dir}")
-                        continue
-
-                    # Load binary model config
-                    try:
-                        binary_model_config = BertConfig.from_pretrained(
-                            os.path.join(binary_fold_dir, "config.json"),
-                            num_labels=2
-                        )
-                        binary_fold_args = copy.deepcopy(binary_args)
-                        binary_fold_args.binary_mode = True
-
-                        binary_model = RBERT.from_pretrained(binary_fold_dir, config=binary_model_config,
-                                                             args=binary_fold_args)
-                        binary_model.to(device)
-                    except Exception as e:
-                        logger.error(f"Failed to load binary model for fold {fold}: {e}")
-                        continue
-
-                    # Get fold training data
-                    cv_splits = binary_trainer.split_kfold(args.k_folds)
-                    train_fold_data, _ = cv_splits[fold]
-
-                    # Filter the training data for this fold
-                    filtered_train_data = filter_dataset_with_binary_classifier(
-                        args, binary_model, train_fold_data, device
-                    )
-
-                    # Store filtered dataset
-                    filtered_fold_datasets[fold] = filtered_train_data
-
-                # Initialize trainer for relation classifier using filtered data
+                # Set up relation classifier parameters
                 relation_args = copy.deepcopy(orig_args)
+                relation_args.binary_mode = False  # Ensure multi-class mode
                 relation_args.model_dir = os.path.join(args.model_dir, "relation")
-                relation_args.binary_model_dir = os.path.join(args.model_dir, "binary")
+                relation_args.binary_model_dir = binary_args.model_dir
 
-                # Train relation classifier with filtered data for each fold
-                filtered_trainer = Trainer(relation_args, train_dataset=None, test_dataset=test_dataset)
+                # Train relation classifier using standard CV approach
+                relation_trainer = Trainer(relation_args, train_dataset=train_dataset, test_dataset=test_dataset)
+
                 if args.do_train:
-                    filtered_trainer.train_with_filtered_data(filtered_fold_datasets)
+                    logger.info("Training relation classifier with cross-validation")
 
-                # Evaluate final model with duo-classifier approach
-                if args.do_eval:
-                    logger.info("Evaluating duo-classifier on test set")
-                    filtered_trainer.evaluate_duo_classifier("test", prefix="duo_final", save_cm=True)
+                    # Use standard train() method which handles cross-validation internally
+                    relation_trainer.train()
+
+                    # After training, evaluate with duo-classifier approach
+                    if args.do_eval:
+                        logger.info("Evaluating duo-classifier on test set")
+                        relation_trainer.evaluate_duo_classifier("test", prefix="duo_final", save_cm=True)
             else:
                 # Standard cross-validation (single classifier)
                 # Initialize trainer with full training dataset
@@ -422,7 +505,7 @@ def main(args):
                 # Set up relation classifier training with filtered data
                 relation_args = copy.deepcopy(orig_args)
                 relation_args.model_dir = os.path.join(args.model_dir, "relation")
-                relation_args.binary_model_dir = binary_args.model_dir
+                relation_args.binary_model_dir = os.path.join(args.model_dir, "binary")
 
                 # Train relation classifier on filtered data
                 relation_trainer = Trainer(relation_args, train_dataset=filtered_train_dataset,

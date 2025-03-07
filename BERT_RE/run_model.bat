@@ -80,7 +80,7 @@ python main.py ^
     --eval_dir ./eval/standard ^
     --max_seq_len 128 ^
     --num_train_epochs 5 ^
-    --train_batch_size 16 ^
+    --train_batch_size 32 ^
     --learning_rate 2e-5 ^
     --save_epochs 1 ^
     --do_train ^
@@ -99,7 +99,7 @@ python main.py ^
     --eval_dir ./eval/cv ^
     --max_seq_len 128 ^
     --num_train_epochs 5 ^
-    --train_batch_size 16 ^
+    --train_batch_size 32 ^
     --learning_rate 2e-5 ^
     --save_epochs 1 ^
     --k_folds 5 ^
@@ -119,7 +119,7 @@ python main.py ^
     --eval_dir ./eval/duo ^
     --max_seq_len 128 ^
     --num_train_epochs 5 ^
-    --train_batch_size 16 ^
+    --train_batch_size 32 ^
     --learning_rate 2e-5 ^
     --save_epochs 1 ^
     --duo_classifier ^
@@ -140,7 +140,7 @@ python main.py ^
     --eval_dir ./eval/duo_cv ^
     --max_seq_len 128 ^
     --num_train_epochs 5 ^
-    --train_batch_size 16 ^
+    --train_batch_size 32 ^
     --learning_rate 2e-5 ^
     --save_epochs 1 ^
     --duo_classifier ^
